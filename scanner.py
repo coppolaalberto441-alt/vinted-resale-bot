@@ -111,7 +111,13 @@ def send(worker_url: str, secret: str, scans: list[dict[str, Any]]) -> dict[str,
     request = urllib.request.Request(
         f"{worker_url.rstrip('/')}/ingest",
         data=json.dumps({"scans": scans}).encode(),
-        headers={"Authorization": f"Bearer {secret}", "Content-Type": "application/json"},
+        headers={
+            "Authorization": f"Bearer {secret}",
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+            "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+            "Chrome/140.0.0.0 Safari/537.36",
+        },
         method="POST",
     )
     try:
