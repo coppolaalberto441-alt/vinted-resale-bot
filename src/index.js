@@ -3,6 +3,8 @@ const DEAL_RATIO = 0.55;
 const escapeHtml = (value) => String(value ?? "")
   .replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
 
+const pause = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
+
 function amount(value) {
   const parsed = Number(value);
   return Number.isFinite(parsed) ? parsed : 0;
@@ -24,12 +26,24 @@ function selectDeals(items) {
 }
 
 async function telegram(env, method, body) {
-  const response = await fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/${method}`, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify(body)
-  });
-  if (!response.ok) throw new Error(`Telegram ${method} HTTP ${response.status}: ${await response.text()}`);
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    const response = await fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/${method}`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body)
+    });
+    if (response.ok) return;
+    const text = await response.text();
+    if (response.status === 429 && attempt === 0) {
+      let retryAfter = 5;
+      try {
+        retryAfter = Math.min(60, Math.max(1, Number(JSON.parse(text)?.parameters?.retry_after || 5)));
+      } catch (_) {}
+      await pause((retryAfter + 1) * 1000);
+      continue;
+    }
+    throw new Error(`Telegram ${method} HTTP ${response.status}: ${text}`);
+  }
 }
 
 async function publish(env, query, deal) {
@@ -74,11 +88,12 @@ async function ingestBrand(env, scan) {
     if (!id || !String(deal.item.url || "").startsWith("https://")) continue;
     const found = await env.DB.prepare("SELECT 1 AS found FROM seen_items WHERE item_id = ?").bind(id).first();
     if (found) continue;
-    await env.DB.prepare("INSERT OR IGNORE INTO seen_items(item_id, brand) VALUES(?, ?)").bind(id, query).run();
     if (initialized) {
       await publish(env, query, deal);
       published += 1;
+      await pause(1200);
     }
+    await env.DB.prepare("INSERT OR IGNORE INTO seen_items(item_id, brand) VALUES(?, ?)").bind(id, query).run();
   }
   await env.DB.prepare(
     "INSERT INTO brand_state(brand, initialized, last_checked_at) VALUES(?, 1, CURRENT_TIMESTAMP) " +
