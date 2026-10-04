@@ -15,7 +15,6 @@
     {"query": "FiveFourFive"},
     {"query": "C.P. Company", "min_price": 20},
     {"query": "Corteiz"},
-    {"query": "Represent"},
     {"query": "Our Legacy"},
     {"query": "Ami Paris"},
     {"query": "Stussy"},
@@ -25,7 +24,6 @@
     {"query": "Arte Antwerp"},
     {"query": "Daily Paper"},
     {"query": "Broken Planet"},
-    {"query": "Axel Arigato"},
     {"query": "Vicinity"},
     {"query": "NWHR"},
     {"query": "Cole Buxton"},
@@ -34,9 +32,7 @@
     {"query": "Clints"},
     {"query": "Scuffers"},
     {"query": "Fugazi"},
-    {"query": "Brain Dead"},
     {"query": "Ader Error"},
-    {"query": "Entire Studios"},
     {"query": "RRR123"},
     {"query": "PDF Channel"},
     {"query": "Peso Clothing"},
@@ -45,6 +41,9 @@
     {"query": "Mutimer"},
     {"query": "Diesel"},
     {"query": "Bershka"},
-    {"query": "Pull & Bear"}
+    {"query": "Pull & Bear"},
+    {"query": "Jaded London"},
+    {"query": "New Era"},
+    {"query": "DC Shoes"}
   ]
 }

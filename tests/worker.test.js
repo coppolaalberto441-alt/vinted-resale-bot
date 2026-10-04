@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { dispatchGithubWorkflow, isSetupCommand, shouldDispatch, topicColor } from "../src/index.js";
+import { dispatchGithubWorkflow, isSetupCommand, resaleEstimate, shouldDispatch, topicColor } from "../src/index.js";
 
 test("recognizes setup commands with an optional bot username", () => {
   assert.equal(isSetupCommand("/setup"), true);
@@ -56,4 +56,20 @@ test("throttles duplicate cron events until the five-minute window", () => {
   assert.equal(shouldDispatch("2026-10-04T20:26:00.000Z", now), false);
   assert.equal(shouldDispatch("2026-10-04T20:25:00.000Z", now), true);
   assert.equal(shouldDispatch(null, now), true);
+});
+
+test("estimates a realistic resale range below the active median", () => {
+  assert.deepEqual(resaleEstimate(100, 45), {
+    low: 75,
+    high: 90,
+    profitLow: 30,
+    profitHigh: 45
+  });
+  assert.deepEqual(resaleEstimate(40, 15), {
+    low: 30,
+    high: 36,
+    profitLow: 15,
+    profitHigh: 21
+  });
+  assert.equal(resaleEstimate(0, 10), null);
 });

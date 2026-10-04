@@ -33,6 +33,24 @@ function selectDeals(items) {
     .map(({ item, total }) => ({ item, total, median }));
 }
 
+export function resaleEstimate(median, purchaseTotal = 0) {
+  const marketMedian = amount(median);
+  const acquisition = amount(purchaseTotal);
+  if (marketMedian <= 0) return null;
+  const roundMarketPrice = (value) => {
+    const step = value >= 50 ? 5 : 1;
+    return Math.max(step, Math.round(value / step) * step);
+  };
+  const low = roundMarketPrice(marketMedian * 0.75);
+  const high = Math.max(low, roundMarketPrice(marketMedian * 0.90));
+  return {
+    low,
+    high,
+    profitLow: Math.max(0, low - acquisition),
+    profitHigh: Math.max(0, high - acquisition)
+  };
+}
+
 async function telegram(env, method, body) {
   for (let attempt = 0; attempt < 2; attempt += 1) {
     const response = await fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/${method}`, {
@@ -118,6 +136,29 @@ async function setupTopics(env, message) {
   }
 }
 
+async function syncLatestGroupTopics(env) {
+  const group = await env.DB.prepare(
+    "SELECT chat_id FROM telegram_groups ORDER BY configured_at DESC LIMIT 1"
+  ).first();
+  if (!group) return;
+  for (let index = 0; index < BRAND_NAMES.length; index += 1) {
+    const brand = BRAND_NAMES[index];
+    const saved = await env.DB.prepare(
+      "SELECT topic_id FROM brand_topics WHERE chat_id=? AND brand=?"
+    ).bind(group.chat_id, brand).first();
+    if (saved) continue;
+    const topic = await telegram(env, "createForumTopic", {
+      chat_id: group.chat_id,
+      name: `🔥 ${brand}`,
+      icon_color: topicColor(index)
+    });
+    await env.DB.prepare(
+      "INSERT OR REPLACE INTO brand_topics(chat_id,brand,topic_id) VALUES(?,?,?)"
+    ).bind(group.chat_id, brand, topic.message_thread_id).run();
+    await pause(250);
+  }
+}
+
 async function handleTelegramUpdate(env, update) {
   const message = update?.message;
   if (!message || !isSetupCommand(message.text)) return;
@@ -143,6 +184,7 @@ async function publish(env, query, deal) {
   const price = amount(item.price);
   const currency = item.currency || "EUR";
   const discount = median > 0 ? Math.round((1 - total / median) * 100) : 0;
+  const resale = resaleEstimate(median, total);
   const caption = [
     `🔥 <b>${escapeHtml(item.title || "Occasione Vinted")}</b>`, "",
     `💶 Prezzo: <b>${price.toFixed(2)} ${escapeHtml(currency)}</b>`,
@@ -150,6 +192,11 @@ async function publish(env, query, deal) {
     `📐 ${escapeHtml(item.details || "Dettagli non disponibili")}`,
     `👤 ${escapeHtml(item.seller || "Venditore non indicato")}`,
     `📊 ${discount}% sotto la mediana degli annunci attivi`, "",
+    ...(resale ? [
+      `💰 Rivendita stimata: <b>${resale.low.toFixed(2)}–${resale.high.toFixed(2)} ${escapeHtml(currency)}</b>`,
+      `📈 Margine lordo stimato: <b>${resale.profitLow.toFixed(2)}–${resale.profitHigh.toFixed(2)} ${escapeHtml(currency)}</b>`,
+      "ℹ️ Stima basata sugli annunci attivi dello stesso brand; vendita non garantita", ""
+    ] : []),
     `Ricerca: ${escapeHtml(query)}`
   ].join("\n");
   const reply_markup = { inline_keyboard: [[{ text: "Apri annuncio", url: item.url }]] };
@@ -248,7 +295,7 @@ async function runScheduledScan(env) {
 
 export default {
   async scheduled(_controller, env, ctx) {
-    ctx.waitUntil(runScheduledScan(env));
+    ctx.waitUntil(Promise.all([runScheduledScan(env), syncLatestGroupTopics(env)]));
   },
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
