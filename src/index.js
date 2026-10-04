@@ -7,6 +7,17 @@ const MIN_DISPATCH_INTERVAL_MS = 270000;
 const GITHUB_WORKFLOW_DISPATCH_URL = "https://api.github.com/repos/coppolaalberto441-alt/vinted-resale-bot/actions/workflows/vinted-scan.yml/dispatches";
 const TOPIC_COLORS = [0x6FB9F0, 0xFFD67E, 0xCB86DB, 0x8EEE98, 0xFF93B2, 0xFB6F5F];
 const BRAND_NAMES = brandConfig.brands.map(({ query }) => String(query));
+const PRODUCT_CATEGORIES = [
+  ["shoes", /\b(scarpe?|sneakers?|trainer|boots?|stivali?|dunk|jordan)\b/i],
+  ["hoodie", /\b(felpa|felpe|hoodie|sweatshirt)\b/i],
+  ["jacket", /\b(giacca|giacche|jacket|coat|cappotto|piumino|parka|gilet)\b/i],
+  ["trousers", /\b(pantaloni?|trousers|jeans|denim|cargo|shorts?)\b/i],
+  ["tshirt", /\b(t[ -]?shirt|magliett[ae]|tee)\b/i],
+  ["shirt", /\b(camici[ae]|shirt|polo)\b/i],
+  ["knitwear", /\b(maglion[ei]|sweater|knit|cardigan)\b/i],
+  ["hat", /\b(cappell[oi]|berrett[oi]|cap|beanie)\b/i],
+  ["bag", /\b(bors[ae]|bag|zaino|backpack)\b/i]
+];
 
 const escapeHtml = (value) => String(value ?? "")
   .replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
@@ -18,19 +29,32 @@ function amount(value) {
   return Number.isFinite(parsed) ? parsed : 0;
 }
 
-function selectDeals(items) {
+function productCategory(item) {
+  const text = `${item?.title || ""} ${item?.details || ""}`;
+  return PRODUCT_CATEGORIES.find(([, pattern]) => pattern.test(text))?.[0] || null;
+}
+
+function medianTotal(entries) {
+  const totals = entries.map(({ total }) => total).sort((a, b) => a - b);
+  const middle = Math.floor(totals.length / 2);
+  return totals.length % 2 ? totals[middle] : (totals[middle - 1] + totals[middle]) / 2;
+}
+
+export function selectDeals(items) {
   const priced = items
     .map((item) => ({ item, total: amount(item.total) || amount(item.price) }))
     .filter(({ total }) => total > 0)
     .sort((a, b) => a.total - b.total);
   if (priced.length < 5) return [];
-  const middle = Math.floor(priced.length / 2);
-  const median = priced.length % 2
-    ? priced[middle].total
-    : (priced[middle - 1].total + priced[middle].total) / 2;
-  return priced
-    .filter(({ total }) => total <= median * DEAL_RATIO)
-    .map(({ item, total }) => ({ item, total, median }));
+  const globalMedian = medianTotal(priced);
+  return priced.flatMap(({ item, total }) => {
+    const category = productCategory(item);
+    const comparable = category
+      ? priced.filter(({ item: candidate }) => productCategory(candidate) === category)
+      : [];
+    const median = comparable.length >= 5 ? medianTotal(comparable) : globalMedian;
+    return total <= median * DEAL_RATIO ? [{ item, total, median }] : [];
+  });
 }
 
 export function resaleEstimate(median, purchaseTotal = 0) {
@@ -41,13 +65,10 @@ export function resaleEstimate(median, purchaseTotal = 0) {
     const step = value >= 50 ? 5 : 1;
     return Math.max(step, Math.round(value / step) * step);
   };
-  const low = roundMarketPrice(marketMedian * 0.75);
-  const high = Math.max(low, roundMarketPrice(marketMedian * 0.90));
+  const quickSale = roundMarketPrice(marketMedian * 0.75);
   return {
-    low,
-    high,
-    profitLow: Math.max(0, low - acquisition),
-    profitHigh: Math.max(0, high - acquisition)
+    quickSale,
+    profit: Math.max(0, quickSale - acquisition)
   };
 }
 
@@ -193,9 +214,9 @@ async function publish(env, query, deal) {
     `👤 ${escapeHtml(item.seller || "Venditore non indicato")}`,
     `📊 ${discount}% sotto la mediana degli annunci attivi`, "",
     ...(resale ? [
-      `💰 Rivendita stimata: <b>${resale.low.toFixed(2)}–${resale.high.toFixed(2)} ${escapeHtml(currency)}</b>`,
-      `📈 Margine lordo stimato: <b>${resale.profitLow.toFixed(2)}–${resale.profitHigh.toFixed(2)} ${escapeHtml(currency)}</b>`,
-      "ℹ️ Stima basata sugli annunci attivi dello stesso brand; vendita non garantita", ""
+      `⚡ Prezzo vendita rapida: <b>${resale.quickSale.toFixed(2)} ${escapeHtml(currency)}</b>`,
+      `📈 Margine lordo possibile: <b>${resale.profit.toFixed(2)} ${escapeHtml(currency)}</b>`,
+      "ℹ️ Calcolato al 25% sotto la mediana degli annunci comparabili attivi; vendita non garantita", ""
     ] : []),
     `Ricerca: ${escapeHtml(query)}`
   ].join("\n");

@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { dispatchGithubWorkflow, isSetupCommand, resaleEstimate, shouldDispatch, topicColor } from "../src/index.js";
+import { dispatchGithubWorkflow, isSetupCommand, resaleEstimate, selectDeals, shouldDispatch, topicColor } from "../src/index.js";
 
 test("recognizes setup commands with an optional bot username", () => {
   assert.equal(isSetupCommand("/setup"), true);
@@ -58,18 +58,26 @@ test("throttles duplicate cron events until the five-minute window", () => {
   assert.equal(shouldDispatch(null, now), true);
 });
 
-test("estimates a realistic resale range below the active median", () => {
+test("estimates one quick-sale price below the active median", () => {
   assert.deepEqual(resaleEstimate(100, 45), {
-    low: 75,
-    high: 90,
-    profitLow: 30,
-    profitHigh: 45
+    quickSale: 75,
+    profit: 30
   });
   assert.deepEqual(resaleEstimate(40, 15), {
-    low: 30,
-    high: 36,
-    profitLow: 15,
-    profitHigh: 21
+    quickSale: 30,
+    profit: 15
   });
   assert.equal(resaleEstimate(0, 10), null);
+});
+
+test("uses same-category listings as price comparables", () => {
+  const items = [
+    ...[40, 50, 60, 70, 80].map((price) => ({ title: "Sneakers modello", price })),
+    ...[200, 220, 240, 260, 280].map((price) => ({ title: "Giacca modello", price }))
+  ];
+  assert.deepEqual(selectDeals(items), []);
+  items[0].price = 25;
+  const deals = selectDeals(items);
+  assert.equal(deals.length, 1);
+  assert.equal(deals[0].median, 60);
 });
