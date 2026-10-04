@@ -1,4 +1,6 @@
 const DEAL_RATIO = 0.55;
+const MAX_PUBLISHES_PER_REQUEST = 4;
+const TELEGRAM_SEND_INTERVAL_MS = 3200;
 
 const escapeHtml = (value) => String(value ?? "")
   .replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
@@ -68,14 +70,16 @@ async function publish(env, query, deal) {
         parse_mode: "HTML", reply_markup
       });
       return;
-    } catch (_) {}
+    } catch (error) {
+      if (String(error).includes("HTTP 429")) throw error;
+    }
   }
   await telegram(env, "sendMessage", {
     chat_id: env.CHANNEL_ID, text: caption, parse_mode: "HTML", reply_markup
   });
 }
 
-async function ingestBrand(env, scan) {
+async function ingestBrand(env, scan, publishLimit) {
   const query = String(scan?.query || "").trim();
   const items = Array.isArray(scan?.items) ? scan.items.slice(0, 100) : [];
   if (!query) throw new Error("Ricerca senza nome");
@@ -88,10 +92,11 @@ async function ingestBrand(env, scan) {
     if (!id || !String(deal.item.url || "").startsWith("https://")) continue;
     const found = await env.DB.prepare("SELECT 1 AS found FROM seen_items WHERE item_id = ?").bind(id).first();
     if (found) continue;
+    if (initialized && published >= publishLimit) continue;
     if (initialized) {
       await publish(env, query, deal);
       published += 1;
-      await pause(1200);
+      await pause(TELEGRAM_SEND_INTERVAL_MS);
     }
     await env.DB.prepare("INSERT OR IGNORE INTO seen_items(item_id, brand) VALUES(?, ?)").bind(id, query).run();
   }
@@ -119,7 +124,12 @@ export default {
         const body = await request.json();
         const scans = Array.isArray(body?.scans) ? body.scans.slice(0, 50) : [];
         const results = [];
-        for (const scan of scans) results.push(await ingestBrand(env, scan));
+        let remainingPublishes = MAX_PUBLISHES_PER_REQUEST;
+        for (const scan of scans) {
+          const result = await ingestBrand(env, scan, remainingPublishes);
+          remainingPublishes -= result.published;
+          results.push(result);
+        }
         await env.DB.prepare(
           "INSERT INTO state(key,value) VALUES('last_github_run',CURRENT_TIMESTAMP) " +
           "ON CONFLICT(key) DO UPDATE SET value=CURRENT_TIMESTAMP"
