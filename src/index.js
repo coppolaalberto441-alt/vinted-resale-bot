@@ -1,6 +1,10 @@
+import brandConfig from "../brands.json" with { type: "json" };
+
 const DEAL_RATIO = 0.55;
 const MAX_PUBLISHES_PER_REQUEST = 4;
 const TELEGRAM_SEND_INTERVAL_MS = 3200;
+const TOPIC_COLORS = [0x6FB9F0, 0xFFD67E, 0xCB86DB, 0x8EEE98, 0xFF93B2, 0xFB6F5F];
+const BRAND_NAMES = brandConfig.brands.map(({ query }) => String(query));
 
 const escapeHtml = (value) => String(value ?? "")
   .replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
@@ -34,7 +38,7 @@ async function telegram(env, method, body) {
       headers: { "content-type": "application/json" },
       body: JSON.stringify(body)
     });
-    if (response.ok) return;
+    if (response.ok) return (await response.json()).result;
     const text = await response.text();
     if (response.status === 429 && attempt === 0) {
       let retryAfter = 5;
@@ -46,6 +50,90 @@ async function telegram(env, method, body) {
     }
     throw new Error(`Telegram ${method} HTTP ${response.status}: ${text}`);
   }
+}
+
+export function isSetupCommand(text) {
+  return /^\/setup(?:@\w+)?(?:\s|$)/i.test(String(text || "").trim());
+}
+
+export function topicColor(index) {
+  return TOPIC_COLORS[index % TOPIC_COLORS.length];
+}
+
+async function sendSetupStatus(env, chatId, text) {
+  await telegram(env, "sendMessage", { chat_id: chatId, text });
+}
+
+async function setupTopics(env, message) {
+  const chatId = String(message.chat.id);
+  if (message.chat.type !== "supergroup" || message.chat.is_forum !== true) {
+    await sendSetupStatus(env, chatId, "❌ /setup funziona solo in un supergruppo con Argomenti attivi.");
+    return;
+  }
+
+  const member = await telegram(env, "getChatMember", {
+    chat_id: chatId,
+    user_id: message.from.id
+  });
+  if (!member || !["administrator", "creator"].includes(member.status)) {
+    await sendSetupStatus(env, chatId, "❌ Solo un amministratore può usare /setup.");
+    return;
+  }
+
+  await env.DB.prepare(
+    "INSERT INTO telegram_groups(chat_id,title,configured_at) VALUES(?,?,CURRENT_TIMESTAMP) " +
+    "ON CONFLICT(chat_id) DO UPDATE SET title=excluded.title, configured_at=CURRENT_TIMESTAMP"
+  ).bind(chatId, String(message.chat.title || "Gruppo Vinted")).run();
+
+  await sendSetupStatus(env, chatId, `⏳ Configurazione avviata: creo ${BRAND_NAMES.length} sezioni. Puoi rilanciare /setup se si interrompe.`);
+  let created = 0;
+  let existing = 0;
+  try {
+    for (let index = 0; index < BRAND_NAMES.length; index += 1) {
+      const brand = BRAND_NAMES[index];
+      const saved = await env.DB.prepare(
+        "SELECT topic_id FROM brand_topics WHERE chat_id=? AND brand=?"
+      ).bind(chatId, brand).first();
+      if (saved) {
+        existing += 1;
+        continue;
+      }
+      const topic = await telegram(env, "createForumTopic", {
+        chat_id: chatId,
+        name: `🔥 ${brand}`,
+        icon_color: topicColor(index)
+      });
+      await env.DB.prepare(
+        "INSERT OR REPLACE INTO brand_topics(chat_id,brand,topic_id) VALUES(?,?,?)"
+      ).bind(chatId, brand, topic.message_thread_id).run();
+      created += 1;
+      await pause(250);
+    }
+    await sendSetupStatus(env, chatId, `✅ Configurazione completata: ${created} sezioni create, ${existing} già presenti. I prossimi annunci saranno divisi per brand.`);
+  } catch (error) {
+    await sendSetupStatus(env, chatId, `⚠️ Configurazione parziale: ${created} create, ${existing} già presenti. Riprova /setup tra un minuto.`);
+    throw error;
+  }
+}
+
+async function handleTelegramUpdate(env, update) {
+  const message = update?.message;
+  if (!message || !isSetupCommand(message.text)) return;
+  await setupTopics(env, message);
+}
+
+async function telegramDestination(env, brand) {
+  const group = await env.DB.prepare(
+    "SELECT chat_id FROM telegram_groups ORDER BY configured_at DESC LIMIT 1"
+  ).first();
+  if (!group) return { chat_id: env.CHANNEL_ID };
+  const topic = await env.DB.prepare(
+    "SELECT topic_id FROM brand_topics WHERE chat_id=? AND brand=?"
+  ).bind(group.chat_id, brand).first();
+  return {
+    chat_id: group.chat_id,
+    ...(topic ? { message_thread_id: topic.topic_id } : {})
+  };
 }
 
 async function publish(env, query, deal) {
@@ -63,10 +151,11 @@ async function publish(env, query, deal) {
     `Ricerca: ${escapeHtml(query)}`
   ].join("\n");
   const reply_markup = { inline_keyboard: [[{ text: "Apri annuncio", url: item.url }]] };
+  const destination = await telegramDestination(env, query);
   if (item.image_url) {
     try {
       await telegram(env, "sendPhoto", {
-        chat_id: env.CHANNEL_ID, photo: item.image_url, caption,
+        ...destination, photo: item.image_url, caption,
         parse_mode: "HTML", reply_markup
       });
       return;
@@ -75,7 +164,7 @@ async function publish(env, query, deal) {
     }
   }
   await telegram(env, "sendMessage", {
-    chat_id: env.CHANNEL_ID, text: caption, parse_mode: "HTML", reply_markup
+    ...destination, text: caption, parse_mode: "HTML", reply_markup
   });
 }
 
@@ -113,7 +202,7 @@ function authorized(request, env) {
 }
 
 export default {
-  async fetch(request, env) {
+  async fetch(request, env, ctx) {
     const url = new URL(request.url);
     if (url.pathname === "/health") {
       return Response.json({ ok: true, service: "vinted-resale-bot", scanner: "github-actions" });
@@ -142,6 +231,26 @@ export default {
         ).bind(message).run();
         return Response.json({ ok: false, error: message }, { status: 500 });
       }
+    }
+    if (url.pathname === "/telegram" && request.method === "POST") {
+      if (request.headers.get("x-telegram-bot-api-secret-token") !== env.TELEGRAM_WEBHOOK_SECRET) {
+        return Response.json({ ok: false }, { status: 401 });
+      }
+      const update = await request.json();
+      ctx.waitUntil(handleTelegramUpdate(env, update));
+      return Response.json({ ok: true });
+    }
+    if (url.pathname === "/configure-webhook" && request.method === "POST") {
+      if (request.headers.get("x-setup-key") !== env.SETUP_KEY) {
+        return Response.json({ ok: false }, { status: 401 });
+      }
+      const result = await telegram(env, "setWebhook", {
+        url: `${url.origin}/telegram`,
+        secret_token: env.TELEGRAM_WEBHOOK_SECRET,
+        allowed_updates: ["message"],
+        drop_pending_updates: false
+      });
+      return Response.json({ ok: true, result });
     }
     return Response.json({ ok: false, error: "Not found" }, { status: 404 });
   }
