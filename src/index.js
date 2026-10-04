@@ -3,6 +3,7 @@ import brandConfig from "../brands.json" with { type: "json" };
 const DEAL_RATIO = 0.55;
 const MAX_PUBLISHES_PER_REQUEST = 4;
 const TELEGRAM_SEND_INTERVAL_MS = 3200;
+const MIN_DISPATCH_INTERVAL_MS = 270000;
 const GITHUB_WORKFLOW_DISPATCH_URL = "https://api.github.com/repos/coppolaalberto441-alt/vinted-resale-bot/actions/workflows/vinted-scan.yml/dispatches";
 const TOPIC_COLORS = [0x6FB9F0, 0xFFD67E, 0xCB86DB, 0x8EEE98, 0xFF93B2, 0xFB6F5F];
 const BRAND_NAMES = brandConfig.brands.map(({ query }) => String(query));
@@ -227,8 +228,17 @@ export async function dispatchGithubWorkflow(env, fetcher = fetch) {
   await saveState(env, "last_dispatch_at", new Date().toISOString());
 }
 
+export function shouldDispatch(lastDispatchAt, now = Date.now()) {
+  const previous = Date.parse(String(lastDispatchAt || ""));
+  return !Number.isFinite(previous) || now - previous >= MIN_DISPATCH_INTERVAL_MS;
+}
+
 async function runScheduledScan(env) {
   try {
+    const previous = await env.DB.prepare(
+      "SELECT value FROM state WHERE key='last_dispatch_at'"
+    ).first();
+    if (!shouldDispatch(previous?.value)) return;
     await dispatchGithubWorkflow(env);
   } catch (error) {
     await saveState(env, "last_dispatch_error", String(error?.stack || error).slice(0, 1500));

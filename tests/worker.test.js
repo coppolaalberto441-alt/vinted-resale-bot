@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { dispatchGithubWorkflow, isSetupCommand, topicColor } from "../src/index.js";
+import { dispatchGithubWorkflow, isSetupCommand, shouldDispatch, topicColor } from "../src/index.js";
 
 test("recognizes setup commands with an optional bot username", () => {
   assert.equal(isSetupCommand("/setup"), true);
@@ -49,4 +49,11 @@ test("fails when GitHub rejects the workflow dispatch", async () => {
     dispatchGithubWorkflow(env, async () => new Response("denied", { status: 403 })),
     /HTTP 403: denied/
   );
+});
+
+test("throttles duplicate cron events until the five-minute window", () => {
+  const now = Date.parse("2026-10-04T20:30:00.000Z");
+  assert.equal(shouldDispatch("2026-10-04T20:26:00.000Z", now), false);
+  assert.equal(shouldDispatch("2026-10-04T20:25:00.000Z", now), true);
+  assert.equal(shouldDispatch(null, now), true);
 });
