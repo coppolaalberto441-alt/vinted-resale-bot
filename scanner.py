@@ -108,23 +108,27 @@ async def collect(config: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 def send(worker_url: str, secret: str, scans: list[dict[str, Any]]) -> dict[str, Any]:
-    request = urllib.request.Request(
-        f"{worker_url.rstrip('/')}/ingest",
-        data=json.dumps({"scans": scans}).encode(),
-        headers={
-            "Authorization": f"Bearer {secret}",
-            "Content-Type": "application/json",
-            "Accept": "application/json",
-            "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
-            "Chrome/140.0.0.0 Safari/537.36",
-        },
-        method="POST",
-    )
-    try:
-        with urllib.request.urlopen(request, timeout=60) as response:
-            return json.load(response)
-    except urllib.error.HTTPError as error:
-        raise RuntimeError(f"Cloudflare HTTP {error.code}: {error.read().decode(errors='replace')}") from error
+    results: list[dict[str, Any]] = []
+    for start in range(0, len(scans), 5):
+        request = urllib.request.Request(
+            f"{worker_url.rstrip('/')}/ingest",
+            data=json.dumps({"scans": scans[start:start + 5]}).encode(),
+            headers={
+                "Authorization": f"Bearer {secret}",
+                "Content-Type": "application/json",
+                "Accept": "application/json",
+                "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+                "Chrome/140.0.0.0 Safari/537.36",
+            },
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=60) as response:
+                payload = json.load(response)
+        except urllib.error.HTTPError as error:
+            raise RuntimeError(f"Cloudflare HTTP {error.code}: {error.read().decode(errors='replace')}") from error
+        results.extend(payload.get("results", []))
+    return {"ok": True, "results": results}
 
 
 def main() -> None:
