@@ -3,6 +3,7 @@ import brandConfig from "../brands.json" with { type: "json" };
 const DEAL_RATIO = 0.55;
 const MAX_PUBLISHES_PER_REQUEST = 4;
 const TELEGRAM_SEND_INTERVAL_MS = 3200;
+const GITHUB_WORKFLOW_DISPATCH_URL = "https://api.github.com/repos/coppolaalberto441-alt/vinted-resale-bot/actions/workflows/vinted-scan.yml/dispatches";
 const TOPIC_COLORS = [0x6FB9F0, 0xFFD67E, 0xCB86DB, 0x8EEE98, 0xFF93B2, 0xFB6F5F];
 const BRAND_NAMES = brandConfig.brands.map(({ query }) => String(query));
 
@@ -201,7 +202,44 @@ function authorized(request, env) {
   return supplied === `Bearer ${env.INGEST_SECRET}`;
 }
 
+async function saveState(env, key, value) {
+  await env.DB.prepare(
+    "INSERT INTO state(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value"
+  ).bind(key, value).run();
+}
+
+export async function dispatchGithubWorkflow(env, fetcher = fetch) {
+  if (!env.GITHUB_ACTIONS_TOKEN) throw new Error("GITHUB_ACTIONS_TOKEN non configurato");
+  const response = await fetcher(GITHUB_WORKFLOW_DISPATCH_URL, {
+    method: "POST",
+    headers: {
+      authorization: `Bearer ${env.GITHUB_ACTIONS_TOKEN}`,
+      accept: "application/vnd.github+json",
+      "x-github-api-version": "2022-11-28",
+      "user-agent": "vinted-resale-cloudflare"
+    },
+    body: JSON.stringify({ ref: "main" })
+  });
+  if (response.status !== 204) {
+    const details = (await response.text()).slice(0, 500);
+    throw new Error(`GitHub workflow dispatch HTTP ${response.status}: ${details}`);
+  }
+  await saveState(env, "last_dispatch_at", new Date().toISOString());
+}
+
+async function runScheduledScan(env) {
+  try {
+    await dispatchGithubWorkflow(env);
+  } catch (error) {
+    await saveState(env, "last_dispatch_error", String(error?.stack || error).slice(0, 1500));
+    throw error;
+  }
+}
+
 export default {
+  async scheduled(_controller, env, ctx) {
+    ctx.waitUntil(runScheduledScan(env));
+  },
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
     if (url.pathname === "/health") {
