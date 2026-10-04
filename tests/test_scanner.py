@@ -1,10 +1,17 @@
 import unittest
+import json
+from pathlib import Path
 from types import SimpleNamespace
 
 from scanner import allowed, money, normalize_item
 
 
 class ScannerTests(unittest.TestCase):
+    def test_brand_queries_are_unique(self):
+        config = json.loads(Path("brands.json").read_text(encoding="utf-8"))
+        queries = [brand["query"].casefold() for brand in config["brands"]]
+        self.assertEqual(len(queries), len(set(queries)))
+
     def test_money_invalid_is_zero(self):
         self.assertEqual(money(None), 0)
         self.assertEqual(money("12.50"), 12.5)

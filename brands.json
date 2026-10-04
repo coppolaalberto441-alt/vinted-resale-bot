@@ -21,7 +21,7 @@
     {"query": "Stussy"},
     {"query": "Palace"},
     {"query": "Supreme"},
-    {"query": "Carhartt WIP"},
+    {"query": "Carhartt"},
     {"query": "Arte Antwerp"},
     {"query": "Daily Paper"},
     {"query": "Broken Planet"},
@@ -39,6 +39,12 @@
     {"query": "Entire Studios"},
     {"query": "RRR123"},
     {"query": "PDF Channel"},
-    {"query": "Peso Clothing"}
+    {"query": "Peso Clothing"},
+    {"query": "Cold Culture"},
+    {"query": "Trendt Vision"},
+    {"query": "Mutimer"},
+    {"query": "Diesel"},
+    {"query": "Bershka"},
+    {"query": "Pull & Bear"}
   ]
 }
