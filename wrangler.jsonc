@@ -1,0 +1,16 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "vinted-resale-bot",
+  "main": "src/index.js",
+  "compatibility_date": "2026-10-04",
+  "vars": {
+    "CHANNEL_ID": "-1004349693299"
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "vinted-resale-bot",
+      "database_id": "5f34a544-9c32-491f-80ab-23ed6cfa7f92"
+    }
+  ]
+}

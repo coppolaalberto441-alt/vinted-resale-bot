@@ -1,0 +1,5 @@
+node_modules/
+.wrangler/
+.pytest_cache/
+__pycache__/
+.secret/
