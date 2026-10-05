@@ -19,9 +19,19 @@ const PRODUCT_CATEGORIES = [
   ["tshirt", /\b(t[ -]?shirt|magliett[ae]|tee)\b/i],
   ["shirt", /\b(camici[ae]|shirt|polo)\b/i],
   ["knitwear", /\b(maglion[ei]|sweater|knit|cardigan)\b/i],
+  ["dress", /\b(vestit[oi]|abit[oi]|dress)\b/i],
+  ["skirt", /\b(gonn[ae]|skirt)\b/i],
+  ["tracksuit", /\b(tut[ae]|tracksuit)\b/i],
   ["hat", /\b(cappell[oi]|berrett[oi]|cap|beanie)\b/i],
-  ["bag", /\b(bors[ae]|bag|zaino|backpack)\b/i]
+  ["bag", /\b(bors[ae]|bag|zaino|backpack)\b/i],
+  ["accessory", /\b(cintur[ae]|belt|portafogli|wallet|occhial[ei]|glasses|orologi?[oi]?|watch|collan[ae]|braccialett[oi])\b/i]
 ];
+const CATEGORY_LABELS = {
+  shoes: "Scarpe", hoodie: "Felpa", jacket: "Giacca", trousers: "Pantaloni",
+  tshirt: "Maglietta", shirt: "Camicia/Polo", knitwear: "Maglieria",
+  dress: "Vestito", skirt: "Gonna", tracksuit: "Tuta", hat: "Cappello",
+  bag: "Borsa", accessory: "Accessorio", other: "Altro"
+};
 
 const escapeHtml = (value) => String(value ?? "")
   .replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
@@ -33,9 +43,13 @@ function amount(value) {
   return Number.isFinite(parsed) ? parsed : 0;
 }
 
-function productCategory(item) {
+export function productCategory(item) {
   const text = `${item?.title || ""} ${item?.details || ""}`;
-  return PRODUCT_CATEGORIES.find(([, pattern]) => pattern.test(text))?.[0] || null;
+  return String(item?.category || PRODUCT_CATEGORIES.find(([, pattern]) => pattern.test(text))?.[0] || "other");
+}
+
+function categoryLabel(category) {
+  return CATEGORY_LABELS[category] || CATEGORY_LABELS.other;
 }
 
 function medianTotal(entries) {
@@ -50,13 +64,12 @@ export function selectDeals(items) {
     .filter(({ total }) => total > 0)
     .sort((a, b) => a.total - b.total);
   if (priced.length < 5) return [];
-  const globalMedian = medianTotal(priced);
   return priced.flatMap(({ item, total }) => {
     const category = productCategory(item);
-    const comparable = category
-      ? priced.filter(({ item: candidate }) => productCategory(candidate) === category)
-      : [];
-    const median = comparable.length >= 5 ? medianTotal(comparable) : globalMedian;
+    if (category === "other") return [];
+    const comparable = priced.filter(({ item: candidate }) => productCategory(candidate) === category);
+    if (comparable.length < 3) return [];
+    const median = medianTotal(comparable);
     return total <= median * DEAL_RATIO ? [{ item, total, median }] : [];
   });
 }
@@ -258,6 +271,7 @@ async function publish(env, query, deal) {
     `💶 Prezzo: <b>${price.toFixed(2)} ${escapeHtml(currency)}</b>`,
     `🧾 Totale noto: <b>${total.toFixed(2)} ${escapeHtml(currency)}</b>`,
     `📐 ${escapeHtml(item.details || "Dettagli non disponibili")}`,
+    `🏷 Categoria: <b>${escapeHtml(categoryLabel(productCategory(item)))}</b>`,
     `👤 ${escapeHtml(item.seller || "Venditore non indicato")}`,
     `📊 ${discount}% sotto la mediana degli annunci attivi`, "",
     ...(resale ? [
@@ -301,6 +315,24 @@ async function ingestBrand(env, scan, publishLimit) {
     "VALUES(?,?,?,?,?,?,CURRENT_TIMESTAMP) ON CONFLICT(bucket,brand) DO UPDATE SET " +
     "listings=excluded.listings,deals=excluded.deals,favourites=excluded.favourites,median_price=excluded.median_price,observed_at=CURRENT_TIMESTAMP"
   ).bind(bucket, query, items.length, deals.length, favourites, medianPrice).run();
+  const categoryGroups = new Map();
+  for (const item of items) {
+    const category = productCategory(item);
+    const group = categoryGroups.get(category) || [];
+    group.push(item);
+    categoryGroups.set(category, group);
+  }
+  for (const [category, categoryItems] of categoryGroups) {
+    const categoryPrices = categoryItems.map((item) => amount(item.price)).filter((price) => price > 0).sort((a, b) => a - b);
+    const categoryMedian = categoryPrices.length ? medianTotal(categoryPrices.map((total) => ({ total }))) : 0;
+    const categoryDeals = deals.filter(({ item }) => productCategory(item) === category).length;
+    const categoryFavourites = categoryItems.reduce((sum, item) => sum + Math.max(0, Number(item.favourites || 0)), 0);
+    await env.DB.prepare(
+      "INSERT INTO category_observations(bucket,brand,category,listings,deals,favourites,median_price,observed_at) " +
+      "VALUES(?,?,?,?,?,?,?,CURRENT_TIMESTAMP) ON CONFLICT(bucket,brand,category) DO UPDATE SET " +
+      "listings=excluded.listings,deals=excluded.deals,favourites=excluded.favourites,median_price=excluded.median_price,observed_at=CURRENT_TIMESTAMP"
+    ).bind(bucket, query, category, categoryItems.length, categoryDeals, categoryFavourites, categoryMedian).run();
+  }
   let published = 0;
   for (const deal of deals) {
     const id = String(deal.item.id || "");
@@ -341,12 +373,29 @@ async function ingestProfile(env, items) {
       String(item.brand || ""), String(item.size || ""), String(item.status || ""),
       Math.max(0, Number(item.favourites || 0)), String(item.image_url || ""), amount(item.price)
     ).run();
+    const category = productCategory(item);
+    const publishedAt = Number.isFinite(Date.parse(String(item.published_at || ""))) ? String(item.published_at) : null;
+    await env.DB.prepare(
+      "INSERT INTO user_listing_details(item_id,category,published_at,publication_source) VALUES(?,?,?,?) " +
+      "ON CONFLICT(item_id) DO UPDATE SET category=excluded.category," +
+      "published_at=COALESCE(user_listing_details.published_at,excluded.published_at)," +
+      "publication_source=CASE WHEN user_listing_details.published_at IS NULL AND excluded.published_at IS NOT NULL THEN excluded.publication_source ELSE user_listing_details.publication_source END"
+    ).bind(id, category, publishedAt, publishedAt ? "first_photo" : "first_seen").run();
+    await env.DB.prepare(
+      "INSERT INTO user_listing_snapshots(item_id,observed_day,price,favourites,active) VALUES(?,date('now'),?,?,1) " +
+      "ON CONFLICT(item_id,observed_day) DO UPDATE SET price=excluded.price,favourites=excluded.favourites,active=1"
+    ).bind(id, amount(item.price), Math.max(0, Number(item.favourites || 0))).run();
   }
   if (activeIds.length) {
     const placeholders = activeIds.map(() => "?").join(",");
     await env.DB.prepare(
       `UPDATE user_listings SET active=0,inactive_at=COALESCE(inactive_at,CURRENT_TIMESTAMP) WHERE active=1 AND item_id NOT IN (${placeholders})`
     ).bind(...activeIds).run();
+    await env.DB.prepare(
+      "INSERT INTO user_listing_snapshots(item_id,observed_day,price,favourites,active) " +
+      "SELECT item_id,date('now'),price,favourites,0 FROM user_listings WHERE active=0 AND date(inactive_at)=date('now') " +
+      "ON CONFLICT(item_id,observed_day) DO UPDATE SET price=excluded.price,favourites=excluded.favourites,active=0"
+    ).run();
   }
   await saveState(env, "last_profile_scan", new Date().toISOString());
   return { active: activeIds.length };
@@ -367,38 +416,80 @@ async function sendTrendReport(env, days, title) {
   const lines = rows.map((row, index) =>
     `${index + 1}. <b>${escapeHtml(row.brand)}</b> · indice ${row.score} · ${row.listings} annunci · mediana ${Number(row.median_price).toFixed(0)}€`
   );
+  const fastResult = await env.DB.prepare(
+    "SELECT COALESCE(NULLIF(u.brand,''),'Senza brand') AS brand,COUNT(*) AS samples," +
+    "ROUND(AVG(julianday(u.inactive_at)-julianday(COALESCE(d.published_at,u.first_seen_at))),1) AS days " +
+    "FROM user_listings u LEFT JOIN user_listing_details d ON d.item_id=u.item_id " +
+    "WHERE u.inactive_at>=datetime('now',?) GROUP BY COALESCE(NULLIF(u.brand,''),'Senza brand') " +
+    "HAVING days>=0 ORDER BY days ASC LIMIT 5"
+  ).bind(`-${Math.max(1, days)} days`).all();
+  const fastLines = (fastResult?.results || []).map((row) =>
+    `• <b>${escapeHtml(row.brand)}</b> · ${row.days} giorni medi · ${row.samples} uscita/e`
+  );
   const text = [
     `📊 <b>${escapeHtml(title)}</b>`, "",
     ...(lines.length ? lines : ["Non ci sono ancora abbastanza rilevazioni."]), "",
-    "ℹ️ Indice stimato da volume, occasioni e preferiti degli annunci osservati; non è il numero ufficiale di vendite Vinted."
+    "⚡ <b>Brand usciti più rapidamente dal tuo profilo attivo</b>",
+    ...(fastLines.length ? fastLines : ["• Storico ancora insufficiente: il bot lo sta costruendo."]), "",
+    "ℹ️ L'uscita può significare vendita, rimozione o annuncio nascosto. L'indice mercato usa volume, occasioni e preferiti; non è il numero ufficiale di vendite Vinted."
   ].join("\n");
   await telegram(env, "sendMessage", { ...(await specialDestination(env, "trends")), text, parse_mode: "HTML" });
+}
+
+async function suggestedProfilePrice(env, row) {
+  const market = await env.DB.prepare(
+    "SELECT AVG(median_price) AS median_price,AVG(listings) AS samples FROM category_observations " +
+    "WHERE lower(brand)=lower(?) AND category=? AND observed_at>=datetime('now','-7 days')"
+  ).bind(String(row.brand || ""), String(row.category || "other")).first();
+  if (Number(market?.samples || 0) >= 3 && Number(market?.median_price || 0) > 0) {
+    const estimated = resaleEstimate(Number(market.median_price), 0)?.quickSale;
+    if (estimated) return { price: estimated, source: `${categoryLabel(row.category)} ${row.brand}` };
+  }
+  return { price: Math.max(1, Math.round(Number(row.price) * 0.9)), source: "storico annuncio" };
 }
 
 async function sendProfileReport(env, requested = false) {
   const active = await env.DB.prepare("SELECT COUNT(*) AS n FROM user_listings WHERE active=1").first();
   const newRows = await env.DB.prepare("SELECT COUNT(*) AS n FROM user_listings WHERE active=1 AND first_seen_at>=datetime('now','-1 day')").first();
   const disappeared = await env.DB.prepare("SELECT COUNT(*) AS n FROM user_listings WHERE inactive_at>=datetime('now','-1 day')").first();
+  const age = await env.DB.prepare(
+    "SELECT ROUND(AVG(julianday('now')-julianday(COALESCE(d.published_at,u.first_seen_at))),1) AS average_age " +
+    "FROM user_listings u LEFT JOIN user_listing_details d ON d.item_id=u.item_id WHERE u.active=1"
+  ).first();
   const stale = await env.DB.prepare(
-    "SELECT item_id,title,url,price,currency,favourites,CAST(julianday('now')-julianday(first_seen_at) AS INTEGER) AS age " +
-    "FROM user_listings WHERE active=1 AND first_seen_at<=datetime('now','-7 days') ORDER BY favourites ASC,first_seen_at ASC LIMIT 3"
+    "SELECT u.item_id,u.title,u.url,u.price,u.currency,u.brand,u.favourites,d.category,d.publication_source," +
+    "CAST(julianday('now')-julianday(COALESCE(d.published_at,u.first_seen_at)) AS INTEGER) AS age," +
+    "u.favourites-COALESCE((SELECT s.favourites FROM user_listing_snapshots s WHERE s.item_id=u.item_id " +
+    "AND s.observed_day>=date('now','-7 days') ORDER BY s.observed_day ASC LIMIT 1),u.favourites) AS fav_gain " +
+    "FROM user_listings u LEFT JOIN user_listing_details d ON d.item_id=u.item_id WHERE u.active=1 " +
+    "AND COALESCE(d.published_at,u.first_seen_at)<=datetime('now','-7 days') ORDER BY fav_gain ASC,age DESC LIMIT 5"
   ).all();
   const top = await env.DB.prepare(
-    "SELECT title,url,price,currency,favourites FROM user_listings WHERE active=1 ORDER BY favourites DESC LIMIT 3"
+    "SELECT u.title,u.url,u.price,u.currency,u.favourites,u.brand,d.category," +
+    "CAST(julianday('now')-julianday(COALESCE(d.published_at,u.first_seen_at)) AS INTEGER) AS age," +
+    "u.favourites-COALESCE((SELECT s.favourites FROM user_listing_snapshots s WHERE s.item_id=u.item_id " +
+    "AND s.observed_day>=date('now','-7 days') ORDER BY s.observed_day ASC LIMIT 1),u.favourites) AS fav_gain " +
+    "FROM user_listings u LEFT JOIN user_listing_details d ON d.item_id=u.item_id WHERE u.active=1 " +
+    "ORDER BY u.favourites DESC LIMIT 3"
   ).all();
-  const staleLines = (stale?.results || []).map((row) => {
-    const suggestion = Math.max(1, Math.round(Number(row.price) * 0.9));
-    return `• <a href="${escapeHtml(row.url)}">${escapeHtml(row.title)}</a> · ${row.age}g · ${row.favourites} preferiti → prova ${suggestion}€`;
-  });
+  const staleLines = [];
+  for (const row of (stale?.results || [])) {
+    const suggestion = await suggestedProfilePrice(env, row);
+    staleLines.push(
+      `• <a href="${escapeHtml(row.url)}">${escapeHtml(row.title)}</a>\n` +
+      `  ${categoryLabel(row.category)} · ~${row.age}g · ${row.favourites} preferiti (${Number(row.fav_gain) >= 0 ? "+" : ""}${row.fav_gain} in 7g) · ${Number(row.price).toFixed(0)}€ → prova ${suggestion.price}€ [${escapeHtml(suggestion.source)}]`
+    );
+  }
   const topLines = (top?.results || []).map((row) =>
-    `• <a href="${escapeHtml(row.url)}">${escapeHtml(row.title)}</a> · ${row.favourites} preferiti · ${Number(row.price).toFixed(0)}€`
+    `• <a href="${escapeHtml(row.url)}">${escapeHtml(row.title)}</a> · ${categoryLabel(row.category)} · ~${row.age}g · ${row.favourites} preferiti (${Number(row.fav_gain) >= 0 ? "+" : ""}${row.fav_gain} in 7g) · ${Number(row.price).toFixed(0)}€`
   );
   const text = [
     `🧠 <b>${requested ? "Report annunci adesso" : "Report giornaliero annunci"}</b>`, "",
-    `Attivi: <b>${active?.n || 0}</b> · Nuovi 24h: <b>${newRows?.n || 0}</b> · Non più attivi 24h: <b>${disappeared?.n || 0}</b>`, "",
+    `Attivi: <b>${active?.n || 0}</b> · Età media: <b>~${age?.average_age || 0} giorni</b>`,
+    `Nuovi 24h: <b>${newRows?.n || 0}</b> · Non più attivi 24h: <b>${disappeared?.n || 0}</b>`, "",
     "⭐ <b>Più interessanti</b>", ...(topLines.length ? topLines : ["• Nessun dato"]), "",
     "⏳ <b>Da migliorare</b>", ...(staleLines.length ? staleLines : ["• Nessun annuncio fermo da almeno 7 giorni"]), "",
-    "Le riduzioni sono suggerimenti prudenti; decidi sempre tu se modificare o ripubblicare."
+    "La data è stimata dalla prima foto pubblica; da oggi prezzo e preferiti vengono storicizzati ogni giorno. Le riduzioni usano prima la mediana dello stesso brand e categoria. Decidi sempre tu se modificare o ripubblicare."
   ].join("\n");
   await telegram(env, "sendMessage", { ...(await specialDestination(env, "assistant")), text, parse_mode: "HTML", disable_web_page_preview: true });
 }
@@ -543,6 +634,8 @@ async function runPeriodicReports(env, now = new Date()) {
     await sendOnce(env, `trend_monthly:${dayKey}`, () => sendTrendReport(env, 30, "Trend mensile"));
   }
   await env.DB.prepare("DELETE FROM brand_observations WHERE observed_at<datetime('now','-35 days')").run();
+  await env.DB.prepare("DELETE FROM category_observations WHERE observed_at<datetime('now','-35 days')").run();
+  await env.DB.prepare("DELETE FROM user_listing_snapshots WHERE observed_day<date('now','-365 days')").run();
 }
 
 export default {

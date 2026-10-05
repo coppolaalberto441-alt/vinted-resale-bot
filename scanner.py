@@ -7,6 +7,7 @@ import sys
 import urllib.error
 import urllib.request
 import http.cookiejar
+from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
@@ -15,6 +16,27 @@ from vinted_scraper import AsyncVintedScraper
 
 
 CONFIG_PATH = Path(__file__).with_name("brands.json")
+
+CATEGORY_WORDS = [
+    ("shoes", ("scarpa", "scarpe", "sneaker", "stivale", "stivali", "boots", "dunk", "jordan")),
+    ("hoodie", ("felpa", "felpe", "hoodie", "sweatshirt")),
+    ("jacket", ("giacca", "giacche", "jacket", "coat", "cappotto", "piumino", "parka", "gilet", "smanicato")),
+    ("trousers", ("pantalone", "pantaloni", "trousers", "jeans", "denim", "cargo", "shorts")),
+    ("tshirt", ("t-shirt", "t shirt", "maglietta", "magliette", " tee ")),
+    ("shirt", ("camicia", "camicie", "shirt", "polo")),
+    ("knitwear", ("maglione", "maglioni", "maglioncino", "sweater", "knit", "cardigan")),
+    ("dress", ("vestito", "abito", "dress")),
+    ("skirt", ("gonna", "skirt")),
+    ("tracksuit", ("tuta", "tute", "tracksuit")),
+    ("hat", ("cappello", "cappelli", "berretto", "berretti", " cap ", "beanie")),
+    ("bag", ("borsa", "borse", " bag ", "zaino", "backpack")),
+    ("accessory", ("cintura", "cinture", "belt", "portafogli", "wallet", "occhiali", "watch", "orologio", "collana", "braccialetto")),
+]
+
+
+def category_for(text: str) -> str:
+    searchable = f" {str(text).lower()} "
+    return next((name for name, words in CATEGORY_WORDS if any(word in searchable for word in words)), "other")
 
 
 def money(value: Any) -> float:
@@ -74,6 +96,13 @@ def collect_profile(profile_id: str) -> list[dict[str, Any]]:
         photos = item.get("photos") or []
         brand = item.get("brand") or {}
         size = item.get("size") or {}
+        photo_timestamp = ((photos[0].get("high_resolution") or {}).get("timestamp") if photos else None)
+        published_at = None
+        if photo_timestamp:
+            try:
+                published_at = datetime.fromtimestamp(int(photo_timestamp), timezone.utc).isoformat()
+            except (ValueError, TypeError, OSError):
+                pass
         listings.append({
             "id": str(item.get("id") or ""),
             "title": str(item.get("title") or "Articolo Vinted"),
@@ -85,6 +114,8 @@ def collect_profile(profile_id: str) -> list[dict[str, Any]]:
             "status": str(item.get("status") or ""),
             "favourites": int(item.get("favourite_count") or 0),
             "image_url": str(photos[0].get("url") if photos else ""),
+            "category": category_for(str(item.get("title") or "")),
+            "published_at": published_at,
         })
     return [row for row in listings if row["id"] and row["url"].startswith("https://")]
 

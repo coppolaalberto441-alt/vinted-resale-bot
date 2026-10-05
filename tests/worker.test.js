@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { dispatchGithubWorkflow, isSetupCommand, resaleEstimate, selectDeals, shouldDispatch, topicColor } from "../src/index.js";
+import { dispatchGithubWorkflow, isSetupCommand, productCategory, resaleEstimate, selectDeals, shouldDispatch, topicColor } from "../src/index.js";
 
 test("recognizes setup commands with an optional bot username", () => {
   assert.equal(isSetupCommand("/setup"), true);
@@ -80,4 +80,18 @@ test("uses same-category listings as price comparables", () => {
   const deals = selectDeals(items);
   assert.equal(deals.length, 1);
   assert.equal(deals[0].median, 60);
+});
+
+test("never compares a t-shirt price with hoodies from the same brand", () => {
+  const items = [
+    { title: "T-shirt logo", price: 10 },
+    { title: "T-shirt bianca", price: 12 },
+    { title: "T-shirt nera", price: 14 },
+    { title: "Felpa cappuccio", price: 70 },
+    { title: "Hoodie zip", price: 80 },
+    { title: "Felpa logo", price: 90 }
+  ];
+  assert.deepEqual(selectDeals(items), []);
+  assert.equal(productCategory({ title: "Maglietta vintage" }), "tshirt");
+  assert.equal(productCategory({ title: "Piumino invernale" }), "jacket");
 });

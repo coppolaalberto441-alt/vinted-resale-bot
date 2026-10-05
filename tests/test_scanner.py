@@ -3,7 +3,7 @@ import json
 from pathlib import Path
 from types import SimpleNamespace
 
-from scanner import allowed, money, normalize_item
+from scanner import allowed, category_for, money, normalize_item
 
 
 class ScannerTests(unittest.TestCase):
@@ -35,6 +35,10 @@ class ScannerTests(unittest.TestCase):
     def test_excluded_words_are_case_insensitive(self):
         self.assertFalse(allowed({"title": "Stone Island REPLICA", "details": "Felpa"}, ["replica"]))
         self.assertTrue(allowed({"title": "Stone Island originale", "details": "Felpa"}, ["replica"]))
+
+    def test_categories_do_not_mix_tshirts_and_hoodies(self):
+        self.assertEqual(category_for("Nike T-shirt vintage"), "tshirt")
+        self.assertEqual(category_for("Nike felpa con cappuccio"), "hoodie")
 
 
 if __name__ == "__main__":
