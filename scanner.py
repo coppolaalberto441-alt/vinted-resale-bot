@@ -6,6 +6,7 @@ import os
 import sys
 import urllib.error
 import urllib.request
+import http.cookiejar
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
@@ -51,7 +52,41 @@ def normalize_item(item: Any) -> dict[str, Any] | None:
         "details": details,
         "seller": str(seller or "Non indicato"),
         "image_url": image_url,
+        "favourites": int(getattr(item, "favourite_count", 0) or 0),
     }
+
+
+def collect_profile(profile_id: str) -> list[dict[str, Any]]:
+    """Read the owner's public wardrobe without storing Vinted credentials."""
+    jar = http.cookiejar.CookieJar()
+    opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(jar))
+    headers = {
+        "Accept": "application/json",
+        "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/140.0.0.0 Safari/537.36",
+    }
+    opener.open(urllib.request.Request(f"https://www.vinted.it/member/{profile_id}", headers=headers), timeout=30).read(1)
+    endpoint = f"https://www.vinted.it/api/v2/wardrobe/{profile_id}/items?page=1&per_page=96"
+    with opener.open(urllib.request.Request(endpoint, headers=headers), timeout=30) as response:
+        rows = json.load(response).get("items", [])
+    listings: list[dict[str, Any]] = []
+    for item in rows:
+        price_data = item.get("price") or {}
+        photos = item.get("photos") or []
+        brand = item.get("brand") or {}
+        size = item.get("size") or {}
+        listings.append({
+            "id": str(item.get("id") or ""),
+            "title": str(item.get("title") or "Articolo Vinted"),
+            "url": str(item.get("url") or f"https://www.vinted.it{item.get('path', '')}"),
+            "price": money(price_data.get("amount")),
+            "currency": str(price_data.get("currency_code") or item.get("currency") or "EUR"),
+            "brand": str(brand.get("title") if isinstance(brand, dict) else brand or ""),
+            "size": str(size.get("title") if isinstance(size, dict) else size or ""),
+            "status": str(item.get("status") or ""),
+            "favourites": int(item.get("favourite_count") or 0),
+            "image_url": str(photos[0].get("url") if photos else ""),
+        })
+    return [row for row in listings if row["id"] and row["url"].startswith("https://")]
 
 
 def allowed(item: dict[str, Any], excluded: list[str]) -> bool:
@@ -107,27 +142,25 @@ async def collect(config: dict[str, Any]) -> list[dict[str, Any]]:
     return scans
 
 
-def send(worker_url: str, secret: str, scans: list[dict[str, Any]]) -> dict[str, Any]:
+def post_json(worker_url: str, secret: str, path: str, payload: dict[str, Any]) -> dict[str, Any]:
+    request = urllib.request.Request(
+        f"{worker_url.rstrip('/')}{path}", data=json.dumps(payload).encode(),
+        headers={"Authorization": f"Bearer {secret}", "Content-Type": "application/json", "Accept": "application/json", "User-Agent": "Mozilla/5.0"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=60) as response:
+            return json.load(response)
+    except urllib.error.HTTPError as error:
+        raise RuntimeError(f"Cloudflare HTTP {error.code}: {error.read().decode(errors='replace')}") from error
+
+
+def send(worker_url: str, secret: str, scans: list[dict[str, Any]], profile: list[dict[str, Any]]) -> dict[str, Any]:
     results: list[dict[str, Any]] = []
     for start in range(0, len(scans), 5):
-        request = urllib.request.Request(
-            f"{worker_url.rstrip('/')}/ingest",
-            data=json.dumps({"scans": scans[start:start + 5]}).encode(),
-            headers={
-                "Authorization": f"Bearer {secret}",
-                "Content-Type": "application/json",
-                "Accept": "application/json",
-                "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
-                "Chrome/140.0.0.0 Safari/537.36",
-            },
-            method="POST",
-        )
-        try:
-            with urllib.request.urlopen(request, timeout=60) as response:
-                payload = json.load(response)
-        except urllib.error.HTTPError as error:
-            raise RuntimeError(f"Cloudflare HTTP {error.code}: {error.read().decode(errors='replace')}") from error
+        payload = post_json(worker_url, secret, "/ingest", {"scans": scans[start:start + 5]})
         results.extend(payload.get("results", []))
+    post_json(worker_url, secret, "/profile-ingest", {"items": profile})
     return {"ok": True, "results": results}
 
 
@@ -138,9 +171,11 @@ def main() -> None:
         raise SystemExit("Mancano WORKER_URL o INGEST_SECRET")
     config = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
     scans = asyncio.run(collect(config))
-    result = send(worker_url, secret, scans)
+    profile_id = os.environ.get("VINTED_PROFILE_ID", "155300457").strip()
+    profile = collect_profile(profile_id)
+    result = send(worker_url, secret, scans, profile)
     published = sum(int(row.get("published", 0)) for row in result.get("results", []))
-    print(f"Ricerche riuscite: {len(scans)}/{len(config['brands'])}; annunci pubblicati: {published}")
+    print(f"Ricerche riuscite: {len(scans)}/{len(config['brands'])}; profilo: {len(profile)} attivi; annunci pubblicati: {published}")
 
 
 if __name__ == "__main__":

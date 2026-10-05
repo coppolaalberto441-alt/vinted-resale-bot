@@ -29,6 +29,7 @@ class ScannerTests(unittest.TestCase):
             "price": 40.0, "total": 43.2, "currency": "EUR",
             "details": "Stone Island · M · Ottime", "seller": "venditore",
             "image_url": "https://img.example/1.jpg",
+            "favourites": 0,
         })
 
     def test_excluded_words_are_case_insensitive(self):

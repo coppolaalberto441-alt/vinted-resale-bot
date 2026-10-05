@@ -4,7 +4,11 @@
   "main": "src/index.js",
   "compatibility_date": "2026-10-04",
   "vars": {
-    "CHANNEL_ID": "-1004349693299"
+    "CHANNEL_ID": "-1004349693299",
+    "VINTED_PROFILE_ID": "155300457"
+  },
+  "ai": {
+    "binding": "AI"
   },
   "triggers": {
     "crons": ["*/5 * * * *"]

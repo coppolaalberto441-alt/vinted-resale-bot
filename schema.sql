@@ -30,3 +30,53 @@ CREATE TABLE IF NOT EXISTS brand_topics (
   created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
   PRIMARY KEY (chat_id, brand)
 );
+
+CREATE TABLE IF NOT EXISTS special_topics (
+  chat_id TEXT NOT NULL,
+  kind TEXT NOT NULL,
+  topic_id INTEGER NOT NULL,
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (chat_id, kind)
+);
+
+CREATE TABLE IF NOT EXISTS brand_observations (
+  bucket TEXT NOT NULL,
+  brand TEXT NOT NULL,
+  listings INTEGER NOT NULL DEFAULT 0,
+  deals INTEGER NOT NULL DEFAULT 0,
+  favourites INTEGER NOT NULL DEFAULT 0,
+  median_price REAL NOT NULL DEFAULT 0,
+  observed_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (bucket, brand)
+);
+
+CREATE INDEX IF NOT EXISTS brand_observations_date_idx ON brand_observations(observed_at);
+
+CREATE TABLE IF NOT EXISTS user_listings (
+  item_id TEXT PRIMARY KEY,
+  title TEXT NOT NULL,
+  url TEXT NOT NULL,
+  price REAL NOT NULL DEFAULT 0,
+  currency TEXT NOT NULL DEFAULT 'EUR',
+  brand TEXT,
+  size TEXT,
+  status TEXT,
+  favourites INTEGER NOT NULL DEFAULT 0,
+  image_url TEXT,
+  active INTEGER NOT NULL DEFAULT 1,
+  first_seen_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  last_seen_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  inactive_at TEXT,
+  last_price REAL
+);
+
+CREATE INDEX IF NOT EXISTS user_listings_active_idx ON user_listings(active, first_seen_at);
+
+CREATE TABLE IF NOT EXISTS photo_sessions (
+  chat_id TEXT NOT NULL,
+  user_id TEXT NOT NULL,
+  metadata TEXT NOT NULL DEFAULT '',
+  analyses TEXT NOT NULL DEFAULT '[]',
+  updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (chat_id, user_id)
+);
