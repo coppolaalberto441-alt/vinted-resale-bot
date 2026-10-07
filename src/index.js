@@ -356,9 +356,13 @@ async function ingestBrand(env, scan, publishLimit) {
       await pause(TELEGRAM_SEND_INTERVAL_MS);
     }
     seenIds.add(id);
-    newSeen.push(env.DB.prepare("INSERT OR IGNORE INTO seen_items(item_id, brand) VALUES(?, ?)").bind(id, query));
+    newSeen.push([id, query]);
   }
-  if (newSeen.length) await env.DB.batch(newSeen);
+  for (let index = 0; index < newSeen.length; index += 50) {
+    const chunk = newSeen.slice(index, index + 50);
+    await env.DB.prepare('INSERT OR IGNORE INTO seen_items(item_id,brand) VALUES ' + chunk.map(() => '(?,?)').join(','))
+      .bind(...chunk.flat()).run();
+  }
   await env.DB.prepare(
     "INSERT INTO brand_state(brand, initialized, last_checked_at) VALUES(?, 1, CURRENT_TIMESTAMP) " +
     "ON CONFLICT(brand) DO UPDATE SET initialized=1, last_checked_at=CURRENT_TIMESTAMP"
@@ -366,43 +370,46 @@ async function ingestBrand(env, scan, publishLimit) {
   return { query, items: items.length, deals: deals.length, published, initialized };
 }
 
-async function ingestProfile(env, items) {
+export async function ingestProfile(env, items) {
   const last = await env.DB.prepare("SELECT value FROM state WHERE key='last_profile_scan'").first();
   if (!shouldRefreshHourly(last?.value)) return { skipped: true };
   const rows = Array.isArray(items) ? items.slice(0, 100) : [];
   const activeIds = [];
-  const writes = [];
+  const listingValues = [];
+  const detailValues = [];
+  const snapshotValues = [];
   for (const item of rows) {
     const id = String(item?.id || "");
     const url = String(item?.url || "");
     if (!id || !url.startsWith("https://")) continue;
     activeIds.push(id);
-    writes.push(env.DB.prepare(
-      "INSERT INTO user_listings(item_id,title,url,price,currency,brand,size,status,favourites,image_url,active,last_seen_at,last_price) " +
-      "VALUES(?,?,?,?,?,?,?,?,?,?,1,CURRENT_TIMESTAMP,?) ON CONFLICT(item_id) DO UPDATE SET " +
-      "title=excluded.title,url=excluded.url,last_price=user_listings.price,price=excluded.price,currency=excluded.currency," +
-      "brand=excluded.brand,size=excluded.size,status=excluded.status,favourites=excluded.favourites,image_url=excluded.image_url," +
-      "active=1,last_seen_at=CURRENT_TIMESTAMP,inactive_at=NULL"
-    ).bind(
+    listingValues.push([
       id, String(item.title || "Articolo Vinted"), url, amount(item.price), String(item.currency || "EUR"),
       String(item.brand || ""), String(item.size || ""), String(item.status || ""),
       Math.max(0, Number(item.favourites || 0)), String(item.image_url || ""), amount(item.price)
-    ));
+    ]);
     const category = productCategory(item);
     const publishedAt = Number.isFinite(Date.parse(String(item.published_at || ""))) ? String(item.published_at) : null;
-    writes.push(env.DB.prepare(
-      "INSERT INTO user_listing_details(item_id,category,published_at,publication_source) VALUES(?,?,?,?) " +
-      "ON CONFLICT(item_id) DO UPDATE SET category=excluded.category," +
-      "published_at=COALESCE(user_listing_details.published_at,excluded.published_at)," +
-      "publication_source=CASE WHEN user_listing_details.published_at IS NULL AND excluded.published_at IS NOT NULL THEN excluded.publication_source ELSE user_listing_details.publication_source END"
-    ).bind(id, category, publishedAt, publishedAt ? "first_photo" : "first_seen"));
-    writes.push(env.DB.prepare(
-      "INSERT INTO user_listing_snapshots(item_id,observed_day,price,favourites,active) VALUES(?,date('now'),?,?,1) " +
-      "ON CONFLICT(item_id,observed_day) DO UPDATE SET price=excluded.price,favourites=excluded.favourites,active=1"
-    ).bind(id, amount(item.price), Math.max(0, Number(item.favourites || 0))));
+    detailValues.push([id, category, publishedAt, publishedAt ? "first_photo" : "first_seen"]);
+    snapshotValues.push([id, amount(item.price), Math.max(0, Number(item.favourites || 0))]);
   }
-  for (let index = 0; index < writes.length; index += 40) {
-    await env.DB.batch(writes.slice(index, index + 40));
+  const groups = [
+    [listingValues, 8,
+      "INSERT INTO user_listings(item_id,title,url,price,currency,brand,size,status,favourites,image_url,active,last_seen_at,last_price) VALUES ",
+      "(?,?,?,?,?,?,?,?,?,?,1,CURRENT_TIMESTAMP,?)",
+      " ON CONFLICT(item_id) DO UPDATE SET title=excluded.title,url=excluded.url,last_price=user_listings.price,price=excluded.price,currency=excluded.currency,brand=excluded.brand,size=excluded.size,status=excluded.status,favourites=excluded.favourites,image_url=excluded.image_url,active=1,last_seen_at=CURRENT_TIMESTAMP,inactive_at=NULL"],
+    [detailValues, 20,
+      "INSERT INTO user_listing_details(item_id,category,published_at,publication_source) VALUES ", "(?,?,?,?)",
+      " ON CONFLICT(item_id) DO UPDATE SET category=excluded.category,published_at=COALESCE(user_listing_details.published_at,excluded.published_at),publication_source=CASE WHEN user_listing_details.published_at IS NULL AND excluded.published_at IS NOT NULL THEN excluded.publication_source ELSE user_listing_details.publication_source END"],
+    [snapshotValues, 30,
+      "INSERT INTO user_listing_snapshots(item_id,observed_day,price,favourites,active) VALUES ", "(?,date('now'),?,?,1)",
+      " ON CONFLICT(item_id,observed_day) DO UPDATE SET price=excluded.price,favourites=excluded.favourites,active=1"]
+  ];
+  for (const [values, chunkSize, prefix, template, suffix] of groups) {
+    for (let index = 0; index < values.length; index += chunkSize) {
+      const chunk = values.slice(index, index + chunkSize);
+      await env.DB.prepare(prefix + chunk.map(() => template).join(',') + suffix).bind(...chunk.flat()).run();
+    }
   }
   if (activeIds.length) {
     const placeholders = activeIds.map(() => "?").join(",");
