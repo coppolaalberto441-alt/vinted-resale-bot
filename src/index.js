@@ -595,10 +595,11 @@ async function analyzePhoto(env, message) {
     if (!await reserveAiUse(env, 'assistant_budget', 100)) throw new Error('Limite gratuito AI');
     const image = bytesToBase64(bytes);
     const answer = await env.AI.run("@cf/moondream/moondream3.1-9B-A2B", {
-      image,
-      prompt: "Valuta questa foto per un annuncio Vinted in italiano. Dai voto 1-10 e consigli molto brevi su luce, nitidezza, inquadratura, sfondo, visibilità completa, etichette/logo/difetti e privacy. Indica se è adatta come copertina. Non inventare autenticità o marca."
+      task: 'query', image: `data:image/jpeg;base64,${image}`, stream: false,
+      reasoning: false, max_tokens: 450,
+      question: "Valuta questa foto per un annuncio Vinted in italiano. Dai voto 1-10 e consigli molto brevi su luce, nitidezza, inquadratura, sfondo, visibilità completa, etichette/logo/difetti e privacy. Indica se è adatta come copertina. Non inventare autenticità o marca."
     });
-    analysis = String(answer?.response || answer?.description || JSON.stringify(answer)).slice(0, 1800);
+    analysis = String(answer?.answer || answer?.response || answer?.description || JSON.stringify(answer)).slice(0, 1800);
   } catch (error) {
     const megapixels = ((Number(photo.width) * Number(photo.height)) / 1_000_000).toFixed(1);
     analysis = `Analisi tecnica: ${photo.width}×${photo.height} (${megapixels} MP). Usa luce naturale, sfondo pulito, articolo intero e foto separate di etichette e difetti. Analisi visiva AI temporaneamente non disponibile.`;
