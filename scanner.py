@@ -188,8 +188,8 @@ def post_json(worker_url: str, secret: str, path: str, payload: dict[str, Any]) 
 
 def send(worker_url: str, secret: str, scans: list[dict[str, Any]], profile: list[dict[str, Any]]) -> dict[str, Any]:
     results: list[dict[str, Any]] = []
-    for start in range(0, len(scans), 5):
-        payload = post_json(worker_url, secret, "/ingest", {"scans": scans[start:start + 5]})
+    for scan in scans:
+        payload = post_json(worker_url, secret, "/ingest", {"scans": [scan]})
         results.extend(payload.get("results", []))
     post_json(worker_url, secret, "/profile-ingest", {"items": profile})
     return {"ok": True, "results": results}

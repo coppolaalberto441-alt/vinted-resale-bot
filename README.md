@@ -2,6 +2,10 @@
 
 Controlla ogni 5 minuti i brand configurati in `brands.json`.
 
+Per ridurre il consumo del piano gratuito, statistiche e profilo vengono salvati una volta all'ora; pulizia e verifica delle sezioni una volta al giorno. Le occasioni continuano a essere controllate ogni 5 minuti. Ogni invio dello scanner contiene un solo brand per rispettare i limiti di query.
+
+Dopo `/nuovo`, la prima foto riceve automaticamente una proposta di copertina AI, fino a 10 al giorno per tutto il bot. Analisi e bozze hanno un limite complessivo di 100 richieste al giorno. Se il modello non è disponibile, viene conservato l'originale. Confrontare sempre risultato e originale prima dell'utilizzo.
+
 - Il cron Cloudflare avvia ogni 5 minuti GitHub Actions, che interroga Vinted.
 - Cloudflare Worker e D1 filtrano i prezzi, evitano duplicati e conservano lo stato.
 - Telegram riceve soltanto i nuovi annunci con prezzo almeno il 45% sotto la mediana attiva.

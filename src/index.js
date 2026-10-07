@@ -310,6 +310,10 @@ async function ingestBrand(env, scan, publishLimit) {
   const medianPrice = prices.length ? prices[Math.floor(prices.length / 2)] : 0;
   const favourites = items.reduce((sum, item) => sum + Math.max(0, Number(item.favourites || 0)), 0);
   const bucket = new Date().toISOString().slice(0, 13);
+  const observation = await env.DB.prepare(
+    "SELECT 1 AS found FROM brand_observations WHERE bucket=? AND brand=?"
+  ).bind(bucket, query).first();
+  if (!observation) {
   await env.DB.prepare(
     "INSERT INTO brand_observations(bucket,brand,listings,deals,favourites,median_price,observed_at) " +
     "VALUES(?,?,?,?,?,?,CURRENT_TIMESTAMP) ON CONFLICT(bucket,brand) DO UPDATE SET " +
@@ -333,20 +337,28 @@ async function ingestBrand(env, scan, publishLimit) {
       "listings=excluded.listings,deals=excluded.deals,favourites=excluded.favourites,median_price=excluded.median_price,observed_at=CURRENT_TIMESTAMP"
     ).bind(bucket, query, category, categoryItems.length, categoryDeals, categoryFavourites, categoryMedian).run();
   }
+  }
+  const ids = deals.map(({ item }) => String(item.id || "")).filter(Boolean);
+  const seen = ids.length ? await env.DB.prepare(
+    `SELECT item_id FROM seen_items WHERE item_id IN (${ids.map(() => "?").join(",")})`
+  ).bind(...ids).all() : { results: [] };
+  const seenIds = new Set((seen.results || []).map((row) => row.item_id));
+  const newSeen = [];
   let published = 0;
   for (const deal of deals) {
     const id = String(deal.item.id || "");
     if (!id || !String(deal.item.url || "").startsWith("https://")) continue;
-    const found = await env.DB.prepare("SELECT 1 AS found FROM seen_items WHERE item_id = ?").bind(id).first();
-    if (found) continue;
+    if (seenIds.has(id)) continue;
     if (initialized && published >= publishLimit) continue;
     if (initialized) {
       await publish(env, query, deal);
       published += 1;
       await pause(TELEGRAM_SEND_INTERVAL_MS);
     }
-    await env.DB.prepare("INSERT OR IGNORE INTO seen_items(item_id, brand) VALUES(?, ?)").bind(id, query).run();
+    seenIds.add(id);
+    newSeen.push(env.DB.prepare("INSERT OR IGNORE INTO seen_items(item_id, brand) VALUES(?, ?)").bind(id, query));
   }
+  if (newSeen.length) await env.DB.batch(newSeen);
   await env.DB.prepare(
     "INSERT INTO brand_state(brand, initialized, last_checked_at) VALUES(?, 1, CURRENT_TIMESTAMP) " +
     "ON CONFLICT(brand) DO UPDATE SET initialized=1, last_checked_at=CURRENT_TIMESTAMP"
@@ -355,14 +367,17 @@ async function ingestBrand(env, scan, publishLimit) {
 }
 
 async function ingestProfile(env, items) {
+  const last = await env.DB.prepare("SELECT value FROM state WHERE key='last_profile_scan'").first();
+  if (!shouldRefreshHourly(last?.value)) return { skipped: true };
   const rows = Array.isArray(items) ? items.slice(0, 100) : [];
   const activeIds = [];
+  const writes = [];
   for (const item of rows) {
     const id = String(item?.id || "");
     const url = String(item?.url || "");
     if (!id || !url.startsWith("https://")) continue;
     activeIds.push(id);
-    await env.DB.prepare(
+    writes.push(env.DB.prepare(
       "INSERT INTO user_listings(item_id,title,url,price,currency,brand,size,status,favourites,image_url,active,last_seen_at,last_price) " +
       "VALUES(?,?,?,?,?,?,?,?,?,?,1,CURRENT_TIMESTAMP,?) ON CONFLICT(item_id) DO UPDATE SET " +
       "title=excluded.title,url=excluded.url,last_price=user_listings.price,price=excluded.price,currency=excluded.currency," +
@@ -372,19 +387,22 @@ async function ingestProfile(env, items) {
       id, String(item.title || "Articolo Vinted"), url, amount(item.price), String(item.currency || "EUR"),
       String(item.brand || ""), String(item.size || ""), String(item.status || ""),
       Math.max(0, Number(item.favourites || 0)), String(item.image_url || ""), amount(item.price)
-    ).run();
+    ));
     const category = productCategory(item);
     const publishedAt = Number.isFinite(Date.parse(String(item.published_at || ""))) ? String(item.published_at) : null;
-    await env.DB.prepare(
+    writes.push(env.DB.prepare(
       "INSERT INTO user_listing_details(item_id,category,published_at,publication_source) VALUES(?,?,?,?) " +
       "ON CONFLICT(item_id) DO UPDATE SET category=excluded.category," +
       "published_at=COALESCE(user_listing_details.published_at,excluded.published_at)," +
       "publication_source=CASE WHEN user_listing_details.published_at IS NULL AND excluded.published_at IS NOT NULL THEN excluded.publication_source ELSE user_listing_details.publication_source END"
-    ).bind(id, category, publishedAt, publishedAt ? "first_photo" : "first_seen").run();
-    await env.DB.prepare(
+    ).bind(id, category, publishedAt, publishedAt ? "first_photo" : "first_seen"));
+    writes.push(env.DB.prepare(
       "INSERT INTO user_listing_snapshots(item_id,observed_day,price,favourites,active) VALUES(?,date('now'),?,?,1) " +
       "ON CONFLICT(item_id,observed_day) DO UPDATE SET price=excluded.price,favourites=excluded.favourites,active=1"
-    ).bind(id, amount(item.price), Math.max(0, Number(item.favourites || 0))).run();
+    ).bind(id, amount(item.price), Math.max(0, Number(item.favourites || 0))));
+  }
+  for (let index = 0; index < writes.length; index += 40) {
+    await env.DB.batch(writes.slice(index, index + 40));
   }
   if (activeIds.length) {
     const placeholders = activeIds.map(() => "?").join(",");
@@ -514,6 +532,45 @@ function bytesToBase64(bytes) {
   return btoa(binary);
 }
 
+async function reserveAiUse(env, kind, limit) {
+  const key = `${kind}:${new Date().toISOString().slice(0, 10)}`;
+  const result = await env.DB.prepare(
+    "INSERT INTO state(key,value) VALUES(?,'1') ON CONFLICT(key) DO UPDATE SET " +
+    "value=CAST(CAST(state.value AS INTEGER)+1 AS TEXT) WHERE CAST(state.value AS INTEGER)<? RETURNING value"
+  ).bind(key, limit).first();
+  return Boolean(result);
+}
+
+export async function makeCover(env, bytes, fileId, destination) {
+  if (!await reserveAiUse(env, 'cover_budget', 10)) {
+    await telegram(env, 'sendMessage', { ...destination, text: '📸 Limite gratuito delle copertine raggiunto per oggi (10). Riprova domani; originale e bozza restano disponibili.' });
+    return;
+  }
+  const form = new FormData();
+  form.append('input_image_0', new Blob([bytes], { type: 'image/jpeg' }), 'original.jpg');
+  form.append('width', '768');
+  form.append('height', '1024');
+  form.append('prompt', 'Edit this real secondhand product photograph into a clean resale listing cover. Preserve the exact item, true colours, logos, text, proportions, texture, visible wear and every defect. Only replace the background with a plain warm off-white surface, center the full item and improve neutral lighting gently. No model, no mannequin, no added accessories, no invented hidden parts, no wrinkle or damage removal.');
+  const multipart = new Response(form);
+  try {
+    const result = await env.AI.run('@cf/black-forest-labs/flux-2-klein-4b', {
+      multipart: { body: multipart.body, contentType: multipart.headers.get('content-type') }
+    });
+    if (typeof result?.image !== 'string' || !result.image) throw new Error('Copertina non ricevuta');
+    const encoded = result.image.replace(/^data:image\/\w+;base64,/, '');
+    const binary = atob(encoded);
+    const imageBytes = Uint8Array.from(binary, (character) => character.charCodeAt(0));
+    const upload = new FormData();
+    for (const [key, value] of Object.entries(destination)) upload.append(key, String(value));
+    upload.append('photo', new Blob([imageBytes], { type: 'image/png' }), 'copertina.png');
+    upload.append('caption', '📸 Copertina proposta con AI. Confrontala con la tua foto: colore, logo, forma e difetti devono coincidere. Conserva anche le foto originali nell’annuncio.');
+    const sent = await fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/sendPhoto`, { method: 'POST', body: upload });
+    if (!sent.ok) throw new Error(`Invio copertina HTTP ${sent.status}`);
+  } catch (_) {
+    await telegram(env, 'sendPhoto', { ...destination, photo: fileId, caption: 'La copertina AI non è disponibile ora. Ho mantenuto la tua foto originale: nessun servizio a pagamento viene attivato.' });
+  }
+}
+
 async function analyzePhoto(env, message) {
   const session = await env.DB.prepare("SELECT metadata,analyses FROM photo_sessions WHERE chat_id=? AND user_id=?")
     .bind(String(message.chat.id), String(message.from.id)).first();
@@ -524,9 +581,12 @@ async function analyzePhoto(env, message) {
   const file = await telegram(env, "getFile", { file_id: photo.file_id });
   const response = await fetch(`https://api.telegram.org/file/bot${env.TELEGRAM_BOT_TOKEN}/${file.file_path}`);
   if (!response.ok) throw new Error(`Download foto Telegram HTTP ${response.status}`);
+  const bytes = new Uint8Array(await response.arrayBuffer());
+  const destination = { chat_id: message.chat.id, ...(message.message_thread_id ? { message_thread_id: message.message_thread_id } : {}) };
   let analysis;
   try {
-    const image = bytesToBase64(new Uint8Array(await response.arrayBuffer()));
+    if (!await reserveAiUse(env, 'assistant_budget', 100)) throw new Error('Limite gratuito AI');
+    const image = bytesToBase64(bytes);
     const answer = await env.AI.run("@cf/moondream/moondream3.1-9B-A2B", {
       image,
       prompt: "Valuta questa foto per un annuncio Vinted in italiano. Dai voto 1-10 e consigli molto brevi su luce, nitidezza, inquadratura, sfondo, visibilità completa, etichette/logo/difetti e privacy. Indica se è adatta come copertina. Non inventare autenticità o marca."
@@ -543,6 +603,7 @@ async function analyzePhoto(env, message) {
     chat_id: message.chat.id, ...(message.message_thread_id ? { message_thread_id: message.message_thread_id } : {}),
     text: `📷 Foto ${analyses.length}/8\n${analysis}\n\nInvia un'altra foto o usa /genera.`
   });
+  if (analyses.length === 1) await makeCover(env, bytes, photo.file_id, destination);
 }
 
 async function generateDraft(env, message) {
@@ -556,6 +617,7 @@ async function generateDraft(env, message) {
   const prompt = `Prepara in italiano una bozza Vinted pronta da copiare, senza inventare dati. Metadati: ${session.metadata || "non forniti"}. Analisi foto: ${analyses.join(" | ") || "nessuna"}. Restituisci: TITOLO (max 80 caratteri), PREZZO CONSIGLIATO con breve motivazione, DESCRIZIONE chiara, FOTO DA MIGLIORARE. Ricorda che l'utente deve confermare tutto.`;
   let draft;
   try {
+    if (!await reserveAiUse(env, 'assistant_budget', 100)) throw new Error('Limite gratuito AI');
     const answer = await env.AI.run("@cf/meta/llama-3.1-8b-instruct", { prompt, max_tokens: 700 });
     draft = String(answer?.response || JSON.stringify(answer));
   } catch (_) {
@@ -602,6 +664,11 @@ export function shouldDispatch(lastDispatchAt, now = Date.now()) {
   return !Number.isFinite(previous) || now - previous >= MIN_DISPATCH_INTERVAL_MS;
 }
 
+export function shouldRefreshHourly(timestamp, now = Date.now()) {
+  const previous = Date.parse(String(timestamp || ""));
+  return !Number.isFinite(previous) || now - previous >= 3600000;
+}
+
 async function runScheduledScan(env) {
   try {
     const previous = await env.DB.prepare(
@@ -633,14 +700,20 @@ async function runPeriodicReports(env, now = new Date()) {
   if (now.getUTCDate() === 1) {
     await sendOnce(env, `trend_monthly:${dayKey}`, () => sendTrendReport(env, 30, "Trend mensile"));
   }
-  await env.DB.prepare("DELETE FROM brand_observations WHERE observed_at<datetime('now','-35 days')").run();
-  await env.DB.prepare("DELETE FROM category_observations WHERE observed_at<datetime('now','-35 days')").run();
-  await env.DB.prepare("DELETE FROM user_listing_snapshots WHERE observed_day<date('now','-365 days')").run();
+  await sendOnce(env, `maintenance:${dayKey}`, async () => {
+    await env.DB.prepare("DELETE FROM brand_observations WHERE observed_at<datetime('now','-35 days')").run();
+    await env.DB.prepare("DELETE FROM category_observations WHERE observed_at<datetime('now','-35 days')").run();
+    await env.DB.prepare("DELETE FROM user_listing_snapshots WHERE observed_day<date('now','-365 days')").run();
+  });
 }
 
 export default {
   async scheduled(_controller, env, ctx) {
-    ctx.waitUntil(Promise.all([runScheduledScan(env), syncLatestGroupTopics(env), runPeriodicReports(env)]));
+    ctx.waitUntil(Promise.all([
+      runScheduledScan(env),
+      sendOnce(env, reportKey('topic_sync'), () => syncLatestGroupTopics(env)),
+      runPeriodicReports(env)
+    ]));
   },
   async fetch(request, env, ctx) {
     const url = new URL(request.url);

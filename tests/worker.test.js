@@ -1,6 +1,33 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { dispatchGithubWorkflow, isSetupCommand, productCategory, resaleEstimate, selectDeals, shouldDispatch, topicColor } from "../src/index.js";
+import { makeCover, shouldRefreshHourly } from '../src/index.js';
+
+test('cover stops before inference when the free daily budget is exhausted', async () => {
+  const originalFetch = globalThis.fetch;
+  let called = false;
+  let message;
+  globalThis.fetch = async (_url, options) => {
+    message = JSON.parse(options.body);
+    return Response.json({ ok: true, result: {} });
+  };
+  try {
+    const env = {
+      DB: { prepare: () => ({ bind: () => ({ first: async () => null }) }) },
+      AI: { run: async () => { called = true; } }, TELEGRAM_BOT_TOKEN: 'test'
+    };
+    await makeCover(env, new Uint8Array([1]), 'test-photo', { chat_id: 1 });
+    assert.equal(called, false);
+    assert.match(message.text, /Limite gratuito/);
+  } finally { globalThis.fetch = originalFetch; }
+});
+
+test('refreshes profile hourly while search dispatch remains every five minutes', () => {
+  const now = Date.parse('2026-10-07T12:00:00Z');
+  assert.equal(shouldRefreshHourly('2026-10-07T11:55:00Z', now), false);
+  assert.equal(shouldRefreshHourly('2026-10-07T11:00:00Z', now), true);
+  assert.equal(shouldDispatch('2026-10-07T11:55:00Z', now), true);
+});
 
 test("recognizes setup commands with an optional bot username", () => {
   assert.equal(isSetupCommand("/setup"), true);
