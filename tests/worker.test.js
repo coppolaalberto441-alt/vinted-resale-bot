@@ -2,6 +2,30 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { dispatchGithubWorkflow, isSetupCommand, productCategory, resaleEstimate, selectDeals, shouldDispatch, topicColor } from "../src/index.js";
 import { makeCover, shouldRefreshHourly } from '../src/index.js';
+import worker from '../src/index.js';
+
+test('exhausted D1 returns a controlled error even when error logging cannot write', async () => {
+  let writes = 0;
+  const env = { INGEST_SECRET: 'test', DB: { prepare() {
+    return { bind() { return this; }, async first() {
+      throw new Error("D1_ERROR: Your account has exceeded D1's free tier daily row write limit");
+    }, async run() { writes++; throw new Error('unavailable'); } };
+  } } };
+  const response = await worker.fetch(new Request('https://test/ingest', {
+    method: 'POST', headers: { authorization: 'Bearer test' },
+    body: JSON.stringify({ scans: [{ query: 'Timberland', items: [] }] })
+  }), env, {});
+  assert.equal(response.status, 503);
+  assert.equal((await response.json()).code, 'quota_exhausted');
+  assert.equal(writes, 0);
+});
+
+test('three same-category comparables suffice and maglioncino is recognized', () => {
+  const deals = selectDeals([5, 80, 100, 110].map(price => ({ title: 'Felpa', price })));
+  assert.equal(deals.length, 1);
+  assert.equal(productCategory({ title: 'Maglioncino Stone Island' }), 'knitwear');
+  assert.equal(productCategory({ title: 'Smanicato puffer' }), 'jacket');
+});
 
 test('cover stops before inference when the free daily budget is exhausted', async () => {
   const originalFetch = globalThis.fetch;
@@ -25,6 +49,7 @@ test('cover stops before inference when the free daily budget is exhausted', asy
 test('refreshes profile hourly while search dispatch remains every five minutes', () => {
   const now = Date.parse('2026-10-07T12:00:00Z');
   assert.equal(shouldRefreshHourly('2026-10-07T11:55:00Z', now), false);
+  assert.equal(shouldRefreshHourly('2026-10-07 11:55:00', now), false);
   assert.equal(shouldRefreshHourly('2026-10-07T11:00:00Z', now), true);
   assert.equal(shouldDispatch('2026-10-07T11:55:00Z', now), true);
 });

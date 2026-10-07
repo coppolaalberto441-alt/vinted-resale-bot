@@ -1,19 +1,19 @@
 {
   "common_exclude": [
-    "replica", "fake", "falso", "non originale", "ispirato", "style",
-    "cover", "custodia", "portachiavi", "etichetta", "cartellino",
+    "replica", "fake", "falso", "non originale", "ispirato",
+    "cover", "custodia", "portachiavi",
     "bambino", "bambina", "kids", "junior", "lotto"
   ],
   "brands": [
     {"query": "Timberland"},
-    {"query": "Stone Island", "min_price": 20},
+    {"query": "Stone Island"},
     {"query": "Reaven"},
     {"query": "EXP5"},
     {"query": "5MC2"},
     {"query": "derschutze"},
     {"query": "545 streetwear"},
     {"query": "FiveFourFive"},
-    {"query": "C.P. Company", "min_price": 20},
+    {"query": "C.P. Company"},
     {"query": "Corteiz"},
     {"query": "Our Legacy"},
     {"query": "Ami Paris"},

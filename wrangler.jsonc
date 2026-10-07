@@ -5,7 +5,8 @@
   "compatibility_date": "2026-10-04",
   "vars": {
     "CHANNEL_ID": "-1004349693299",
-    "VINTED_PROFILE_ID": "155300457"
+    "VINTED_PROFILE_ID": "155300457",
+    "SCAN_RESUME_AT": "2026-10-08T00:00:00Z"
   },
   "ai": {
     "binding": "AI"

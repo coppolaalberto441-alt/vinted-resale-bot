@@ -2,11 +2,34 @@ import unittest
 import json
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch, AsyncMock
+import asyncio
 
-from scanner import allowed, category_for, money, normalize_item
+from scanner import allowed, category_for, money, normalize_item, send, scan_brand
 
 
 class ScannerTests(unittest.TestCase):
+    def test_genuine_new_with_tags_is_not_excluded(self):
+        config = json.loads(Path('brands.json').read_text(encoding='utf-8'))
+        self.assertTrue(allowed({'title': 'Felpa nuovo con cartellino etichetta originale'}, config['common_exclude']))
+        self.assertTrue(allowed({'title': 'Giacca outdoor coverall'}, config['common_exclude']))
+        self.assertFalse(allowed({'title': 'Felpa replica'}, config['common_exclude']))
+
+    def test_one_failed_brand_does_not_cancel_following_brands(self):
+        with patch('scanner.post_json', side_effect=[RuntimeError('HTTP 500'), {'ok': True, 'results': [{'published': 1}]}]) as post:
+            result = send('https://test', 'test', [{'query': 'First'}, {'query': 'Second'}])
+        self.assertEqual(post.call_count, 2)
+        self.assertEqual(result['results'], [{'published': 1}])
+        self.assertEqual(len(result['errors']), 1)
+
+    def test_two_pages_deduplicate_and_do_not_have_an_implicit_price_floor(self):
+        scraper = SimpleNamespace(search=AsyncMock(side_effect=[list(range(50)), [49, 50]]))
+        with patch('scanner.normalize_item', side_effect=lambda n: {'id': str(n), 'title': 'Felpa', 'price': 2}):
+            result = asyncio.run(scan_brand(scraper, {'query': 'Test'}, []))
+        self.assertEqual(len(result['items']), 51)
+        self.assertNotIn('price_from', scraper.search.call_args_list[0].args[0])
+        self.assertEqual(scraper.search.call_args_list[1].args[0]['page'], 2)
+
     def test_brand_queries_are_unique(self):
         config = json.loads(Path("brands.json").read_text(encoding="utf-8"))
         queries = [brand["query"].casefold() for brand in config["brands"]]

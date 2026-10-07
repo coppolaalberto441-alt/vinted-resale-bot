@@ -17,6 +17,14 @@ CREATE TABLE IF NOT EXISTS seen_items (
 
 CREATE INDEX IF NOT EXISTS seen_items_brand_idx ON seen_items(brand);
 
+CREATE TABLE IF NOT EXISTS pending_deals (
+  item_id TEXT PRIMARY KEY,
+  brand TEXT NOT NULL,
+  payload TEXT NOT NULL,
+  queued_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS pending_deals_brand_idx ON pending_deals(brand, queued_at);
+
 CREATE TABLE IF NOT EXISTS telegram_groups (
   chat_id TEXT PRIMARY KEY,
   title TEXT NOT NULL,

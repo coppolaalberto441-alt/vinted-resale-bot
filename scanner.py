@@ -7,6 +7,8 @@ import sys
 import urllib.error
 import urllib.request
 import http.cookiejar
+import re
+import time
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
@@ -122,7 +124,7 @@ def collect_profile(profile_id: str) -> list[dict[str, Any]]:
 
 def allowed(item: dict[str, Any], excluded: list[str]) -> bool:
     text = f"{item.get('title', '')} {item.get('details', '')}".lower()
-    return not any(word.lower() in text for word in excluded)
+    return not any(re.search(r"(?<!\w)" + re.escape(word.lower()) + r"(?!\w)", text) for word in excluded)
 
 
 async def scan_brand(scraper: AsyncVintedScraper, brand: dict[str, Any], excluded: list[str]) -> dict[str, Any]:
@@ -133,11 +135,26 @@ async def scan_brand(scraper: AsyncVintedScraper, brand: dict[str, Any], exclude
         "currency": "EUR",
         "page": 1,
         "per_page": 50,
-        "price_from": str(brand.get("min_price", 10)),
     }
-    items = await scraper.search(params)
-    normalized = [result for item in items if (result := normalize_item(item)) and allowed(result, excluded)]
-    return {"query": query, "items": normalized}
+    if brand.get("min_price") is not None:
+        params["price_from"] = str(brand["min_price"])
+    normalized = {}
+    warnings = []
+    for page in range(1, 3):
+        try:
+            items = await scraper.search({**params, "page": page})
+        except Exception as error:
+            if page == 1:
+                raise
+            warnings.append(f"Seconda pagina non disponibile: {type(error).__name__}")
+            break
+        for item in items:
+            result = normalize_item(item)
+            if result and allowed(result, excluded):
+                normalized[result["id"]] = result
+        if len(items) < 50:
+            break
+    return {"query": query, "items": list(normalized.values()), "warnings": warnings}
 
 
 async def collect(config: dict[str, Any]) -> list[dict[str, Any]]:
@@ -179,20 +196,41 @@ def post_json(worker_url: str, secret: str, path: str, payload: dict[str, Any]) 
         headers={"Authorization": f"Bearer {secret}", "Content-Type": "application/json", "Accept": "application/json", "User-Agent": "Mozilla/5.0"},
         method="POST",
     )
-    try:
-        with urllib.request.urlopen(request, timeout=60) as response:
-            return json.load(response)
-    except urllib.error.HTTPError as error:
-        raise RuntimeError(f"Cloudflare HTTP {error.code}: {error.read().decode(errors='replace')}") from error
+    for attempt in range(2):
+        try:
+            with urllib.request.urlopen(request, timeout=30) as response:
+                return json.load(response)
+        except urllib.error.HTTPError as error:
+            detail = error.read().decode(errors='replace')
+            if attempt == 0 and error.code in (502, 503, 504) and 'quota_exhausted' not in detail:
+                time.sleep(1)
+                continue
+            raise RuntimeError(f"Cloudflare HTTP {error.code}: {detail}") from error
+        except urllib.error.URLError:
+            if attempt:
+                raise
+            time.sleep(1)
 
 
-def send(worker_url: str, secret: str, scans: list[dict[str, Any]], profile: list[dict[str, Any]]) -> dict[str, Any]:
+def send(worker_url: str, secret: str, scans: list[dict[str, Any]], profile: list[dict[str, Any]] | None = None) -> dict[str, Any]:
     results: list[dict[str, Any]] = []
+    errors = []
     for scan in scans:
-        payload = post_json(worker_url, secret, "/ingest", {"scans": [scan]})
-        results.extend(payload.get("results", []))
-    post_json(worker_url, secret, "/profile-ingest", {"items": profile})
-    return {"ok": True, "results": results}
+        try:
+            payload = post_json(worker_url, secret, "/ingest", {"scans": [scan]})
+            if not payload.get("ok"):
+                raise RuntimeError(str(payload.get("error") or "Invio non riuscito"))
+            results.extend(payload.get("results", []))
+        except Exception as error:
+            message = f"{scan['query']}: {error}"
+            print(message, file=sys.stderr)
+            errors.append(message)
+            # A shared exhausted quota affects all brands; do not hammer the service.
+            if "quota_exhausted" in str(error):
+                break
+    if profile is not None:
+        post_json(worker_url, secret, "/profile-ingest", {"items": profile})
+    return {"ok": not errors, "results": results, "errors": errors}
 
 
 def main() -> None:
@@ -203,10 +241,17 @@ def main() -> None:
     config = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
     scans = asyncio.run(collect(config))
     profile_id = os.environ.get("VINTED_PROFILE_ID", "155300457").strip()
-    profile = collect_profile(profile_id)
-    result = send(worker_url, secret, scans, profile)
+    result = send(worker_url, secret, scans)
+    profile = []
+    try:
+        profile = collect_profile(profile_id)
+        post_json(worker_url, secret, "/profile-ingest", {"items": profile})
+    except Exception as error:
+        print(f"Profilo non aggiornato (ricerche indipendenti): {error}", file=sys.stderr)
     published = sum(int(row.get("published", 0)) for row in result.get("results", []))
     print(f"Ricerche riuscite: {len(scans)}/{len(config['brands'])}; profilo: {len(profile)} attivi; annunci pubblicati: {published}")
+    if result["errors"]:
+        raise SystemExit("Invii incompleti: controllare gli errori per brand riportati sopra")
 
 
 if __name__ == "__main__":

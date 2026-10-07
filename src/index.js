@@ -14,11 +14,11 @@ const SPECIAL_TOPICS = [
 const PRODUCT_CATEGORIES = [
   ["shoes", /\b(scarpe?|sneakers?|trainer|boots?|stivali?|dunk|jordan)\b/i],
   ["hoodie", /\b(felpa|felpe|hoodie|sweatshirt)\b/i],
-  ["jacket", /\b(giacca|giacche|jacket|coat|cappotto|piumino|parka|gilet)\b/i],
+  ["jacket", /\b(giacca|giacche|jacket|coat|cappotto|piumino|puffer|parka|gilet|smanicato)\b/i],
   ["trousers", /\b(pantaloni?|trousers|jeans|denim|cargo|shorts?)\b/i],
   ["tshirt", /\b(t[ -]?shirt|magliett[ae]|tee)\b/i],
   ["shirt", /\b(camici[ae]|shirt|polo)\b/i],
-  ["knitwear", /\b(maglion[ei]|sweater|knit|cardigan)\b/i],
+  ["knitwear", /\b(maglion[ei]|maglioncin[oi]|sweater|knit|cardigan)\b/i],
   ["dress", /\b(vestit[oi]|abit[oi]|dress)\b/i],
   ["skirt", /\b(gonn[ae]|skirt)\b/i],
   ["tracksuit", /\b(tut[ae]|tracksuit)\b/i],
@@ -63,7 +63,7 @@ export function selectDeals(items) {
     .map((item) => ({ item, total: amount(item.total) || amount(item.price) }))
     .filter(({ total }) => total > 0)
     .sort((a, b) => a.total - b.total);
-  if (priced.length < 5) return [];
+  if (priced.length < 3) return [];
   return priced.flatMap(({ item, total }) => {
     const category = productCategory(item);
     if (category === "other") return [];
@@ -299,11 +299,11 @@ async function publish(env, query, deal) {
   });
 }
 
-async function ingestBrand(env, scan, publishLimit) {
+export async function ingestBrand(env, scan, publishLimit) {
   const query = String(scan?.query || "").trim();
   const items = Array.isArray(scan?.items) ? scan.items.slice(0, 100) : [];
   if (!query) throw new Error("Ricerca senza nome");
-  const state = await env.DB.prepare("SELECT initialized FROM brand_state WHERE brand = ?").bind(query).first();
+  const state = await env.DB.prepare("SELECT initialized,last_checked_at FROM brand_state WHERE brand = ?").bind(query).first();
   const initialized = state?.initialized === 1;
   const deals = selectDeals(items);
   const prices = items.map((item) => amount(item.price)).filter((price) => price > 0).sort((a, b) => a - b);
@@ -344,30 +344,60 @@ async function ingestBrand(env, scan, publishLimit) {
   ).bind(...ids).all() : { results: [] };
   const seenIds = new Set((seen.results || []).map((row) => row.item_id));
   const newSeen = [];
+  const queue = [];
   let published = 0;
   for (const deal of deals) {
     const id = String(deal.item.id || "");
     if (!id || !String(deal.item.url || "").startsWith("https://")) continue;
     if (seenIds.has(id)) continue;
-    if (initialized && published >= publishLimit) continue;
     if (initialized) {
-      await publish(env, query, deal);
-      published += 1;
-      await pause(TELEGRAM_SEND_INTERVAL_MS);
+      queue.push([id, query, JSON.stringify(deal)]);
+      continue;
     }
     seenIds.add(id);
     newSeen.push([id, query]);
+  }
+  // INSERT OR IGNORE keeps already queued offers without rewriting their rows.
+  for (let index = 0; index < queue.length; index += 30) {
+    const chunk = queue.slice(index, index + 30);
+    await env.DB.prepare('INSERT OR IGNORE INTO pending_deals(item_id,brand,payload) VALUES ' + chunk.map(() => '(?,?,?)').join(','))
+      .bind(...chunk.flat()).run();
+  }
+  let pending = { results: [] };
+  if (initialized) {
+    pending = await env.DB.prepare('SELECT item_id,payload FROM pending_deals WHERE brand=? AND NOT EXISTS (SELECT 1 FROM seen_items WHERE seen_items.item_id=pending_deals.item_id) ORDER BY queued_at,item_id LIMIT ?')
+      .bind(query, publishLimit).all();
+    for (const row of pending.results || []) {
+      await publish(env, query, JSON.parse(row.payload));
+      // Store confirmation immediately: later failures must not resend earlier successes.
+      await env.DB.prepare('INSERT OR IGNORE INTO seen_items(item_id,brand) VALUES(?,?)').bind(row.item_id, query).run();
+      await env.DB.prepare('DELETE FROM pending_deals WHERE item_id=?').bind(row.item_id).run();
+      published++;
+      await pause(TELEGRAM_SEND_INTERVAL_MS);
+    }
   }
   for (let index = 0; index < newSeen.length; index += 50) {
     const chunk = newSeen.slice(index, index + 50);
     await env.DB.prepare('INSERT OR IGNORE INTO seen_items(item_id,brand) VALUES ' + chunk.map(() => '(?,?)').join(','))
       .bind(...chunk.flat()).run();
   }
-  await env.DB.prepare(
+  if (!initialized || shouldRefreshHourly(state?.last_checked_at)) await env.DB.prepare(
     "INSERT INTO brand_state(brand, initialized, last_checked_at) VALUES(?, 1, CURRENT_TIMESTAMP) " +
     "ON CONFLICT(brand) DO UPDATE SET initialized=1, last_checked_at=CURRENT_TIMESTAMP"
   ).bind(query).run();
-  return { query, items: items.length, deals: deals.length, published, initialized };
+  return { query, items: items.length, deals: deals.length, published, initialized, warnings: scan.warnings || [] };
+}
+
+async function failureResponse(env, key, error) {
+  const message = String(error?.message || error).slice(0, 1200);
+  console.error(message);
+  const quota = /free tier daily|row write limit/i.test(message);
+  // Logging must not throw again when the database is unavailable or exhausted.
+  if (!quota) {
+    try { await saveState(env, key, message); } catch (logError) { console.error(String(logError)); }
+  }
+  return Response.json({ ok: false, error: message, code: quota ? 'quota_exhausted' : 'ingest_failed' },
+    { status: quota ? 503 : 500 });
 }
 
 export async function ingestProfile(env, items) {
@@ -673,7 +703,10 @@ export function shouldDispatch(lastDispatchAt, now = Date.now()) {
 }
 
 export function shouldRefreshHourly(timestamp, now = Date.now()) {
-  const previous = Date.parse(String(timestamp || ""));
+  const text = String(timestamp || '');
+  // SQLite CURRENT_TIMESTAMP is UTC, even though its string has no timezone suffix.
+  const normalized = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(text) ? text.replace(' ', 'T') + 'Z' : text;
+  const previous = Date.parse(normalized);
   return !Number.isFinite(previous) || now - previous >= 3600000;
 }
 
@@ -685,7 +718,8 @@ async function runScheduledScan(env) {
     if (!shouldDispatch(previous?.value)) return;
     await dispatchGithubWorkflow(env);
   } catch (error) {
-    await saveState(env, "last_dispatch_error", String(error?.stack || error).slice(0, 1500));
+    try { await saveState(env, "last_dispatch_error", String(error?.message || error).slice(0, 1500)); }
+    catch (_) { console.error(String(error)); }
     throw error;
   }
 }
@@ -717,6 +751,7 @@ async function runPeriodicReports(env, now = new Date()) {
 
 export default {
   async scheduled(_controller, env, ctx) {
+    if (Date.now() < Date.parse(env.SCAN_RESUME_AT || '')) return;
     ctx.waitUntil(Promise.all([
       runScheduledScan(env),
       sendOnce(env, reportKey('topic_sync'), () => syncLatestGroupTopics(env)),
@@ -726,7 +761,7 @@ export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
     if (url.pathname === "/health") {
-      return Response.json({ ok: true, service: "vinted-resale-bot", scanner: "github-actions" });
+      return Response.json({ ok: true, service: "vinted-resale-bot", scanner: "github-actions", resume_at: env.SCAN_RESUME_AT || null });
     }
     if (url.pathname === "/ingest" && request.method === "POST") {
       if (!authorized(request, env)) return Response.json({ ok: false }, { status: 401 });
@@ -740,17 +775,14 @@ export default {
           remainingPublishes -= result.published;
           results.push(result);
         }
-        await env.DB.prepare(
+        const lastRun = await env.DB.prepare("SELECT value FROM state WHERE key='last_github_run'").first();
+        if (shouldRefreshHourly(lastRun?.value)) await env.DB.prepare(
           "INSERT INTO state(key,value) VALUES('last_github_run',CURRENT_TIMESTAMP) " +
           "ON CONFLICT(key) DO UPDATE SET value=CURRENT_TIMESTAMP"
         ).run();
         return Response.json({ ok: true, results });
       } catch (error) {
-        const message = String(error?.stack || error).slice(0, 1500);
-        await env.DB.prepare(
-          "INSERT INTO state(key,value) VALUES('last_error',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value"
-        ).bind(message).run();
-        return Response.json({ ok: false, error: message }, { status: 500 });
+        return failureResponse(env, 'last_error', error);
       }
     }
     if (url.pathname === "/profile-ingest" && request.method === "POST") {
@@ -759,9 +791,7 @@ export default {
         const body = await request.json();
         return Response.json({ ok: true, ...(await ingestProfile(env, body?.items)) });
       } catch (error) {
-        const message = String(error?.stack || error).slice(0, 1500);
-        await saveState(env, "last_profile_error", message);
-        return Response.json({ ok: false, error: message }, { status: 500 });
+        return failureResponse(env, 'last_profile_error', error);
       }
     }
     if (url.pathname === "/telegram" && request.method === "POST") {
