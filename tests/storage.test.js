@@ -2,7 +2,36 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
 import { readFileSync } from 'node:fs';
-import { ingestProfile, ingestBrand } from '../src/index.js';
+import { ingestProfile, ingestBrand, sendDiagnostic } from '../src/index.js';
+
+test('Telegram status and brand rejection report read real storage without database writes', async () => {
+  const sqlite = new DatabaseSync(':memory:');
+  sqlite.exec(readFileSync(new URL('../schema.sql', import.meta.url), 'utf8'));
+  sqlite.exec("INSERT INTO telegram_groups(chat_id,title) VALUES('1','Test')");
+  const summary = { completed_at: new Date().toISOString(), expected_brands: 40, failed_brands: [],
+    results: [{ query: 'Stone Island', items: 50, published: 3, diagnostics: { unknown_category: 7 } }] };
+  sqlite.prepare('INSERT INTO state VALUES(?,?)').run('last_scan_summary', JSON.stringify(summary));
+  let writes = 0;
+  const env = { TELEGRAM_BOT_TOKEN: 'test', DB: { prepare(sql) {
+    const statement = { bind(...params) { return {
+      async first() { return sqlite.prepare(sql).get(...params); },
+      async all() { return { results: sqlite.prepare(sql).all(...params) }; },
+      async run() { writes++; return sqlite.prepare(sql).run(...params); }
+    }; } };
+    return Object.assign(statement, statement.bind());
+  } } };
+  const originalFetch = globalThis.fetch;
+  const messages = [];
+  globalThis.fetch = async (_url, options) => { messages.push(JSON.parse(options.body)); return Response.json({ ok: true, result: {} }); };
+  try {
+    await sendDiagnostic(env, { chat: { id: 1 }, message_thread_id: 77, text: '/stato' }, false);
+    await sendDiagnostic(env, { chat: { id: 1 }, text: '/scarti@vingtoBot Stone Island' }, true);
+    assert.equal(messages[0].message_thread_id, 77);
+    assert.match(messages[0].text, /Notifiche confermate in questa scansione: 3/);
+    assert.match(messages[1].text, /Categoria non riconosciuta: 7/);
+    assert.equal(writes, 0);
+  } finally { globalThis.fetch = originalFetch; sqlite.close(); }
+});
 
 test('excess offers survive the next empty scan, with no repeated hourly status writes', async () => {
   const sqlite = new DatabaseSync(':memory:');

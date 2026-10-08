@@ -463,12 +463,12 @@ export function diagnosticText(summary, queued, usage, scarti = false, brand = '
 
 export async function sendDiagnostic(env, message, scarti) {
   const destination = { chat_id: message.chat.id, ...(message.message_thread_id ? { message_thread_id: message.message_thread_id } : {}) };
-  const group = await env.DB.prepare('SELECT chat_id FROM telegram_groups WHERE chat_id=?').bind(String(message.chat.id)).first();
-  if (!group) {
-    await telegram(env, 'sendMessage', { ...destination, text: 'Usa /stato e /scarti nel gruppo configurato del bot.' });
-    return;
-  }
   try {
+    const group = await env.DB.prepare('SELECT chat_id FROM telegram_groups WHERE chat_id=?').bind(String(message.chat.id)).first();
+    if (!group) {
+      await telegram(env, 'sendMessage', { ...destination, text: 'Usa /stato e /scarti nel gruppo configurato del bot.' });
+      return;
+    }
     const rows = await env.DB.prepare("SELECT key,value FROM state WHERE key IN ('last_scan_summary','verified_d1_usage')").all();
     const state = Object.fromEntries(rows.results.map(row => [row.key, JSON.parse(row.value)]));
     const queued = await env.DB.prepare('SELECT COUNT(*) AS n FROM pending_deals WHERE NOT EXISTS (SELECT 1 FROM seen_items WHERE seen_items.item_id=pending_deals.item_id)').first();
