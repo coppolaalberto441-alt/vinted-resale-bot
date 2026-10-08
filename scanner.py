@@ -77,6 +77,8 @@ def normalize_item(item: Any) -> dict[str, Any] | None:
         "seller": str(seller or "Non indicato"),
         "image_url": image_url,
         "favourites": int(getattr(item, "favourite_count", 0) or 0),
+        "brand": str(getattr(item, "brand_title", None) or getattr(getattr(item, "brand", None), "title", None) or ""),
+        "condition": str(getattr(item, "status", None) or ""),
     }
 
 

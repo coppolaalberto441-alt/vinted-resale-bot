@@ -23,4 +23,8 @@ Dopo `/nuovo`, la prima foto riceve automaticamente una proposta di copertina AI
 
 I dati di vendita complessivi di Vinted non sono pubblici: i trend sono stime trasparenti basate sugli annunci osservati. Il bot non modifica né ripubblica annunci e non genera visualizzazioni o preferiti artificiali.
 
+Le nuove stime di rivendita escludono l'articolo candidato e confrontano almeno tre altri annunci con prezzo articolo (senza commissioni), stessa categoria, marca nota, valuta e condizione nota. Modello e variante vengono avvicinati tramite il titolo: è una corrispondenza euristica, non un'identificazione certificata. Quando il tipo è esplicito, zip/girocollo/cappuccio o stivali/sneakers non vengono mescolati. Su campioni di almeno cinque prezzi vengono esclusi gli estremi tramite IQR.
+
+La fascia proposta usa l'80% del primo quartile e l'85% della mediana dei prezzi richiesti: è una regola prudenziale, non una probabilità di vendita calibrata. Attendibilità bassa o media, mai vendita garantita; dati generici o condizione sconosciuta restano a bassa attendibilità. Margini prima di spedizione e altri costi possono essere negativi. Annunci già in coda senza confronti salvati mostrano stima non disponibile. Non si aggiungono richieste Vinted, AI o scritture di statistiche per questo calcolo.
+
 Le chiavi `WORKER_URL` e `INGEST_SECRET` sono salvate nei GitHub Actions secrets. `GITHUB_ACTIONS_TOKEN` è salvato nei secret Cloudflare. Nessuna chiave è presente nel codice pubblico.

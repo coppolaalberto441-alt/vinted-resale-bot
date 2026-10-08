@@ -1,4 +1,5 @@
 import brandConfig from "../brands.json" with { type: "json" };
+import { estimateResale } from './estimates.js';
 
 const DEAL_RATIO = 0.55;
 const MAX_PUBLISHES_PER_REQUEST = 4;
@@ -45,7 +46,9 @@ function amount(value) {
 
 export function productCategory(item) {
   const text = `${item?.title || ""} ${item?.details || ""}`;
-  return String(item?.category || PRODUCT_CATEGORIES.find(([, pattern]) => pattern.test(text))?.[0] || "other");
+  // "Felpa Jordan" is apparel, not shoes just because the model name appears.
+  const garment = PRODUCT_CATEGORIES.find(([category, pattern]) => category !== 'shoes' && pattern.test(String(item?.title || '')));
+  return String(item?.category || garment?.[0] || PRODUCT_CATEGORIES.find(([, pattern]) => pattern.test(text))?.[0] || "other");
 }
 
 function categoryLabel(category) {
@@ -280,12 +283,13 @@ async function telegramDestination(env, brand) {
   };
 }
 
-async function publish(env, query, deal) {
+export async function publish(env, query, deal) {
   const { item, total, median } = deal;
   const price = amount(item.price);
   const currency = item.currency || "EUR";
   const discount = median > 0 ? Math.round((1 - total / median) * 100) : 0;
-  const resale = resaleEstimate(median, total);
+  // Old queued payloads have no peer sample: never substitute the old broad median.
+  const resale = deal.resale || null;
   const caption = [
     `🔥 <b>${escapeHtml(item.title || "Occasione Vinted")}</b>`, "",
     `💶 Prezzo: <b>${price.toFixed(2)} ${escapeHtml(currency)}</b>`,
@@ -295,10 +299,13 @@ async function publish(env, query, deal) {
     `👤 ${escapeHtml(item.seller || "Venditore non indicato")}`,
     `📊 ${discount}% sotto la mediana degli annunci attivi`, "",
     ...(resale ? [
-      `⚡ Prezzo vendita rapida: <b>${resale.quickSale.toFixed(2)} ${escapeHtml(currency)}</b>`,
-      `📈 Margine lordo possibile: <b>${resale.profit.toFixed(2)} ${escapeHtml(currency)}</b>`,
-      "ℹ️ Calcolato al 25% sotto la mediana degli annunci comparabili attivi; vendita non garantita", ""
-    ] : []),
+      `⚡ Fascia proposta: <b>${resale.low.toFixed(2)}–${resale.high.toFixed(2)} ${escapeHtml(currency)}</b>`,
+      `🎯 Prezzo suggerito: ${resale.suggested.toFixed(2)} ${escapeHtml(currency)}`,
+      `📊 ${resale.count} confronti · attendibilità ${escapeHtml(resale.confidence)}`,
+      `🔎 ${escapeHtml(resale.basis)}${resale.condition === 'unknown' ? ' · condizione non verificata' : ' · stessa condizione'}`,
+      `📈 Margine prima della spedizione: ${resale.marginLow.toFixed(2)}–${resale.marginHigh.toFixed(2)} ${escapeHtml(currency)}`,
+      "ℹ️ Stima da prezzi richiesti, non vendite concluse. Spedizione e altri costi esclusi; vendita non garantita.", ""
+    ] : ['⚠️ Stima rivendita non disponibile: confronti simili insufficienti.', '']),
     `Ricerca: ${escapeHtml(query)}`
   ].join("\n");
   const reply_markup = { inline_keyboard: [[{ text: "Apri annuncio", url: item.url }]] };
@@ -372,7 +379,7 @@ export async function ingestBrand(env, scan, publishLimit) {
     if (!id || !String(deal.item.url || "").startsWith("https://")) continue;
     if (seenIds.has(id)) continue;
     if (initialized) {
-      queue.push([id, query, JSON.stringify(deal)]);
+      queue.push([id, query, JSON.stringify({ ...deal, resale: estimateResale(deal.item, items, query, productCategory) })]);
       continue;
     }
     seenIds.add(id);
