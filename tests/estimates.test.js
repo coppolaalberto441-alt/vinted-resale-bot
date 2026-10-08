@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { estimateResale, conditionOf } from '../src/estimates.js';
+import { estimateResale, conditionOf, createResaleEstimator } from '../src/estimates.js';
 import { productCategory, publish } from '../src/index.js';
 
 const target = { id: 'target', title: 'Nike Dunk Low', brand: 'Nike', condition: 'Ottime', price: 10, total: 12 };
@@ -16,6 +16,7 @@ test('estimates use asking prices, exclude the candidate and remove extreme outl
   assert.equal(estimate.high, 42);
   assert.equal(estimate.marginLow, 24);
   assert.equal(estimate.confidence, 'bassa');
+  assert.deepEqual(createResaleEstimator(sample, 'Nike', productCategory)(target), estimate);
 });
 
 test('different categories, brands, conditions, Dunk High and SB are not mixed', () => {

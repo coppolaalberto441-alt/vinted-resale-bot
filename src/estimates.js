@@ -43,7 +43,13 @@ function quantile(sorted, fraction) {
   return sorted[base] + (sorted[Math.ceil(position)] - sorted[base]) * (position - base);
 }
 
-export function estimateResale(item, items, query, categoryOf) {
+export function createResaleEstimator(items, query, categoryOf) {
+  const features = new Map(items.map(peer => [peer, { category: categoryOf(peer), condition: conditionOf(peer),
+    type: subtype(peer, categoryOf(peer)), model: modelTokens(peer, query), title: text(peer.title), brand: text(peer.brand) }]));
+  return item => estimateResale(item, items, query, categoryOf, features);
+}
+
+export function estimateResale(item, items, query, categoryOf, features = null) {
   const category = categoryOf(item);
   if (category === 'other') return null;
   const condition = conditionOf(item);
@@ -52,19 +58,20 @@ export function estimateResale(item, items, query, categoryOf) {
   const currency = String(item.currency || 'EUR');
   const ids = new Set();
   const candidates = items.filter(peer => {
+    const feature = features?.get(peer);
     if (peer === item || (item.id && String(peer.id) === String(item.id)) || (item.url && peer.url === item.url)) return false;
     if (peer.id && ids.has(String(peer.id))) return false;
     if (peer.id) ids.add(String(peer.id));
-    if (categoryOf(peer) !== category || String(peer.currency || 'EUR') !== currency) return false;
-    if (item.brand && peer.brand && text(item.brand) !== text(peer.brand)) return false;
-    if (condition !== 'unknown' && conditionOf(peer) !== condition) return false;
-    if (type !== 'unknown' && subtype(peer, category) !== type) return false;
+    if ((feature?.category || categoryOf(peer)) !== category || String(peer.currency || 'EUR') !== currency) return false;
+    if (item.brand && peer.brand && text(item.brand) !== (feature?.brand || text(peer.brand))) return false;
+    if (condition !== 'unknown' && (feature?.condition || conditionOf(peer)) !== condition) return false;
+    if (type !== 'unknown' && (feature?.type || subtype(peer, category)) !== type) return false;
     if (category === 'shoes') {
       const cut = text(item.title).match(/\b(low|high|mid)\b/)?.[1];
-      if (cut && text(peer.title).match(/\b(low|high|mid)\b/)?.[1] !== cut) return false;
-      if (/\bdunk\b/.test(text(item.title)) && /\bsb\b/.test(text(item.title)) !== /\bsb\b/.test(text(peer.title))) return false;
+      if (cut && (feature?.title || text(peer.title)).match(/\b(low|high|mid)\b/)?.[1] !== cut) return false;
+      if (/\bdunk\b/.test(text(item.title)) && /\bsb\b/.test(text(item.title)) !== /\bsb\b/.test(feature?.title || text(peer.title))) return false;
     }
-    const otherModel = modelTokens(peer, query);
+    const otherModel = feature?.model || modelTokens(peer, query);
     if (model.size) {
       // Explicit numeric models must agree even when other words overlap.
       const numbers = [...model].filter(word => /\d/.test(word));

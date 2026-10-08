@@ -1,5 +1,5 @@
 import brandConfig from "../brands.json" with { type: "json" };
-import { estimateResale } from './estimates.js';
+import { createResaleEstimator } from './estimates.js';
 
 const DEAL_RATIO = 0.55;
 const MAX_PUBLISHES_PER_REQUEST = 4;
@@ -373,13 +373,14 @@ export async function ingestBrand(env, scan, publishLimit) {
   const seenIds = new Set((seen.results || []).map((row) => row.item_id));
   const newSeen = [];
   const queue = [];
+  const estimate = initialized && deals.length ? createResaleEstimator(items, query, productCategory) : () => null;
   let published = 0;
   for (const deal of deals) {
     const id = String(deal.item.id || "");
     if (!id || !String(deal.item.url || "").startsWith("https://")) continue;
     if (seenIds.has(id)) continue;
     if (initialized) {
-      queue.push([id, query, JSON.stringify({ ...deal, resale: estimateResale(deal.item, items, query, productCategory) })]);
+      queue.push([id, query, JSON.stringify({ ...deal, resale: estimate(deal.item) })]);
       continue;
     }
     seenIds.add(id);
