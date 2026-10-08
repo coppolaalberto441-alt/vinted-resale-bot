@@ -27,6 +27,7 @@ class ScannerTests(unittest.TestCase):
         with patch('scanner.normalize_item', side_effect=lambda n: {'id': str(n), 'title': 'Felpa', 'price': 2}):
             result = asyncio.run(scan_brand(scraper, {'query': 'Test'}, []))
         self.assertEqual(len(result['items']), 51)
+        self.assertEqual(result['diagnostics']['duplicates'], 1)
         self.assertNotIn('price_from', scraper.search.call_args_list[0].args[0])
         self.assertEqual(scraper.search.call_args_list[1].args[0]['page'], 2)
 

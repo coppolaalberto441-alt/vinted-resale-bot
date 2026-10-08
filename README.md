@@ -17,6 +17,8 @@ Dopo `/nuovo`, la prima foto riceve automaticamente una proposta di copertina AI
 - Telegram riceve soltanto i nuovi annunci con prezzo almeno il 45% sotto la mediana attiva.
 - Il profilo Vinted `155300457` viene letto senza password: il bot registra annunci attivi, prezzi e preferiti e invia un report giornaliero.
 - `/report` genera il report subito; `/trend`, `/trend7` e `/trend30` mostrano gli indici di tendenza stimati.
+- Nel gruppo configurato, `/stato` mostra il riepilogo effettivo dell'ultima scansione, brand mancanti, notifiche confermate e coda. `/scarti` mostra i motivi di esclusione; `/scarti Stone Island` restringe il riepilogo a un brand.
+- Il riepilogo diagnostico sostituisce una sola riga per scansione, non registra ogni articolo. I contatori si riferiscono agli annunci ricevuti, non all'intero catalogo. La quota mostrata è l'ultima verifica ufficiale salvata con data/ora, non un contatore live; una verifica del giorno UTC precedente non viene presentata come attuale.
 - `/nuovo brand | tipo | taglia | condizione | prezzo` avvia l'assistente foto; invia le foto e usa `/genera` per ottenere una bozza da confermare manualmente.
 
 I dati di vendita complessivi di Vinted non sono pubblici: i trend sono stime trasparenti basate sugli annunci osservati. Il bot non modifica né ripubblica annunci e non genera visualizzazioni o preferiti artificiali.

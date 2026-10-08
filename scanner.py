@@ -140,6 +140,8 @@ async def scan_brand(scraper: AsyncVintedScraper, brand: dict[str, Any], exclude
         params["price_from"] = str(brand["min_price"])
     normalized = {}
     warnings = []
+    diagnostics = {"received": 0, "invalid": 0, "excluded": 0, "duplicates": 0}
+    seen_ids = set()
     for page in range(1, 3):
         try:
             items = await scraper.search({**params, "page": page})
@@ -149,12 +151,22 @@ async def scan_brand(scraper: AsyncVintedScraper, brand: dict[str, Any], exclude
             warnings.append(f"Seconda pagina non disponibile: {type(error).__name__}")
             break
         for item in items:
+            diagnostics["received"] += 1
             result = normalize_item(item)
-            if result and allowed(result, excluded):
-                normalized[result["id"]] = result
+            if not result:
+                diagnostics["invalid"] += 1
+                continue
+            if result["id"] in seen_ids:
+                diagnostics["duplicates"] += 1
+                continue
+            seen_ids.add(result["id"])
+            if not allowed(result, excluded):
+                diagnostics["excluded"] += 1
+                continue
+            normalized[result["id"]] = result
         if len(items) < 50:
             break
-    return {"query": query, "items": list(normalized.values()), "warnings": warnings}
+    return {"query": query, "items": list(normalized.values()), "warnings": warnings, "diagnostics": diagnostics}
 
 
 async def collect(config: dict[str, Any]) -> list[dict[str, Any]]:
@@ -242,6 +254,14 @@ def main() -> None:
     scans = asyncio.run(collect(config))
     profile_id = os.environ.get("VINTED_PROFILE_ID", "155300457").strip()
     result = send(worker_url, secret, scans)
+    successful = {row["query"] for row in result["results"]}
+    try:
+        post_json(worker_url, secret, "/scan-summary", {
+            "results": result["results"],
+            "failed_brands": [brand["query"] for brand in config["brands"] if brand["query"] not in successful],
+        })
+    except Exception as error:
+        print(f"Riepilogo non salvato: {error}", file=sys.stderr)
     profile = []
     try:
         profile = collect_profile(profile_id)

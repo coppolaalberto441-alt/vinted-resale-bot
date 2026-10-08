@@ -3,6 +3,42 @@ import assert from "node:assert/strict";
 import { dispatchGithubWorkflow, isSetupCommand, productCategory, resaleEstimate, selectDeals, shouldDispatch, topicColor } from "../src/index.js";
 import { makeCover, shouldRefreshHourly } from '../src/index.js';
 import worker from '../src/index.js';
+import { assessDeals, diagnosticText } from '../src/index.js';
+
+test('each rejected item has one concrete reason without changing the deal selection', () => {
+  const items = [{ title: 'Felpa', price: 0 }, { title: 'Solo modello', price: 2 },
+    { title: 'Giacca', price: 3 }, ...[5, 80, 100].map(price => ({ title: 'Felpa', price }))];
+  const result = assessDeals(items);
+  assert.deepEqual(result.counts, { invalid_price: 1, unknown_category: 1, few_comparables: 1, above_threshold: 2 });
+  assert.equal(result.deals.length, 1);
+  assert.equal(Object.values(result.counts).reduce((a, b) => a + b, 0) + result.deals.length, items.length);
+  assert.deepEqual(selectDeals(items), result.deals);
+});
+
+test('status distinguishes partial and stale scans and never presents old quota as live', () => {
+  const summary = { completed_at: '2026-10-08T12:00:00Z', expected_brands: 40,
+    results: [{ query: 'Nike', items: 50, published: 2, diagnostics: { unknown_category: 3 } }], failed_brands: ['Stone Island'] };
+  const usage = { day: '2026-10-07', rowsWritten: 100000, checked_at: '2026-10-07T12:00:00Z' };
+  const text = diagnosticText(summary, 5, usage, false, '', Date.parse('2026-10-08T12:05:00Z'));
+  assert.match(text, /Scansione parziale/);
+  assert.match(text, /1\/40/);
+  assert.match(text, /in coda: 5/);
+  assert.match(text, /verifica aggiornata non disponibile/);
+  assert.match(diagnosticText(summary, 0, null, false, '', Date.parse('2026-10-08T13:00:00Z')), /riepilogo vecchio/);
+  assert.match(diagnosticText(summary, 0, null, true, 'Nike'), /Categoria non riconosciuta: 3/);
+});
+
+test('scan summary requires authentication and adds a server-side timestamp', async () => {
+  const writes = [];
+  const env = { INGEST_SECRET: 'test', DB: { prepare() { return { bind(...values) { writes.push(values); return { run: async () => ({ success: true }) }; } }; } } };
+  const unauth = await worker.fetch(new Request('https://test/scan-summary', { method: 'POST' }), env, {});
+  assert.equal(unauth.status, 401);
+  assert.equal(writes.length, 0);
+  const response = await worker.fetch(new Request('https://test/scan-summary', { method: 'POST', headers: { authorization: 'Bearer test' }, body: JSON.stringify({ results: [], failed_brands: ['Nike'] }) }), env, {});
+  assert.equal(response.status, 200);
+  assert.equal(writes[0][0], 'last_scan_summary');
+  assert.ok(Number.isFinite(Date.parse(JSON.parse(writes[0][1]).completed_at)));
+});
 
 test('exhausted D1 returns a controlled error even when error logging cannot write', async () => {
   let writes = 0;

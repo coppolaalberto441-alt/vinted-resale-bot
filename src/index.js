@@ -58,21 +58,39 @@ function medianTotal(entries) {
   return totals.length % 2 ? totals[middle] : (totals[middle - 1] + totals[middle]) / 2;
 }
 
-export function selectDeals(items) {
+export function assessDeals(items) {
+  const counts = { invalid_price: 0, unknown_category: 0, few_comparables: 0, above_threshold: 0 };
+  const examples = [];
+  const reject = (item, reason) => {
+    counts[reason]++;
+    if (examples.length < 3) examples.push({ title: String(item?.title || 'Articolo').slice(0, 100), reason });
+  };
   const priced = items
     .map((item) => ({ item, total: amount(item.total) || amount(item.price) }))
-    .filter(({ total }) => total > 0)
+    .filter(({ item, total }) => { if (total > 0) return true; reject(item, 'invalid_price'); return false; })
     .sort((a, b) => a.total - b.total);
-  if (priced.length < 3) return [];
-  return priced.flatMap(({ item, total }) => {
+  const groups = new Map();
+  for (const entry of priced) {
+    const category = productCategory(entry.item);
+    const group = groups.get(category) || [];
+    group.push(entry);
+    groups.set(category, group);
+  }
+  const medians = new Map([...groups].map(([key, group]) => [key, medianTotal(group)]));
+  const deals = priced.flatMap(({ item, total }) => {
     const category = productCategory(item);
-    if (category === "other") return [];
-    const comparable = priced.filter(({ item: candidate }) => productCategory(candidate) === category);
-    if (comparable.length < 3) return [];
-    const median = medianTotal(comparable);
-    return total <= median * DEAL_RATIO ? [{ item, total, median }] : [];
+    if (category === 'other') { reject(item, 'unknown_category'); return []; }
+    const comparable = groups.get(category);
+    if (comparable.length < 3) { reject(item, 'few_comparables'); return []; }
+    const median = medians.get(category);
+    if (total <= median * DEAL_RATIO) return [{ item, total, median }];
+    reject(item, 'above_threshold');
+    return [];
   });
+  return { deals, counts, examples };
 }
+
+export function selectDeals(items) { return assessDeals(items).deals; }
 
 export function resaleEstimate(median, purchaseTotal = 0) {
   const marketMedian = amount(median);
@@ -225,6 +243,8 @@ async function syncLatestGroupTopics(env) {
 async function handleTelegramUpdate(env, update) {
   const message = update?.message;
   if (!message) return;
+  if (command(message.text, 'stato')) return sendDiagnostic(env, message, false);
+  if (command(message.text, 'scarti')) return sendDiagnostic(env, message, true);
   if (isSetupCommand(message.text)) return setupTopics(env, message);
   if (command(message.text, "trend")) return sendTrendReport(env, 1, "Trend di oggi");
   if (command(message.text, "trend7")) return sendTrendReport(env, 7, "Trend ultimi 7 giorni");
@@ -305,7 +325,8 @@ export async function ingestBrand(env, scan, publishLimit) {
   if (!query) throw new Error("Ricerca senza nome");
   const state = await env.DB.prepare("SELECT initialized,last_checked_at FROM brand_state WHERE brand = ?").bind(query).first();
   const initialized = state?.initialized === 1;
-  const deals = selectDeals(items);
+  const assessment = assessDeals(items);
+  const deals = assessment.deals;
   const prices = items.map((item) => amount(item.price)).filter((price) => price > 0).sort((a, b) => a - b);
   const medianPrice = prices.length ? prices[Math.floor(prices.length / 2)] : 0;
   const favourites = items.reduce((sum, item) => sum + Math.max(0, Number(item.favourites || 0)), 0);
@@ -385,7 +406,77 @@ export async function ingestBrand(env, scan, publishLimit) {
     "INSERT INTO brand_state(brand, initialized, last_checked_at) VALUES(?, 1, CURRENT_TIMESTAMP) " +
     "ON CONFLICT(brand) DO UPDATE SET initialized=1, last_checked_at=CURRENT_TIMESTAMP"
   ).bind(query).run();
-  return { query, items: items.length, deals: deals.length, published, initialized, warnings: scan.warnings || [] };
+  return { query, items: items.length, deals: deals.length, published, initialized,
+    diagnostics: { ...assessment.counts, already_seen: seenIds.size, baseline: initialized ? 0 : newSeen.length,
+      examples: assessment.examples, scanner: scan.diagnostics || null }, warnings: scan.warnings || [] };
+}
+
+const REASON_LABELS = {
+  invalid_price: 'Prezzo non valido', unknown_category: 'Categoria non riconosciuta',
+  few_comparables: 'Meno di 3 confronti della stessa categoria', above_threshold: 'Sconto inferiore al 45%',
+  already_seen: 'Offerta già notificata/registrata', baseline: 'Inizializzazione (nessuna notifica)'
+};
+
+function romeTime(timestamp) {
+  const text = String(timestamp || '');
+  const date = new Date(/^\d{4}-\d{2}-\d{2} /.test(text) ? text.replace(' ', 'T') + 'Z' : text);
+  return Number.isFinite(date.getTime()) ? date.toLocaleString('it-IT', { timeZone: 'Europe/Rome' }) : 'non disponibile';
+}
+
+export function diagnosticText(summary, queued, usage, scarti = false, brand = '', now = Date.now()) {
+  if (!summary) return '⏳ Nessun riepilogo disponibile: attendi la prossima scansione. Non significa che il bot sia fermo.';
+  const results = Array.isArray(summary.results) ? summary.results : [];
+  const filtered = brand ? results.filter(row => String(row.query).toLowerCase().includes(brand.toLowerCase())) : results;
+  if (brand && !filtered.length) return `Brand non presente nell’ultima scansione: ${brand.slice(0, 80)}. Usa /scarti senza brand per il riepilogo.`;
+  if (scarti) {
+    const totals = Object.fromEntries(Object.keys(REASON_LABELS).map(key => [key, 0]));
+    let excluded = 0, invalid = 0;
+    for (const row of filtered) {
+      for (const key of Object.keys(totals)) totals[key] += Number(row.diagnostics?.[key] || 0);
+      excluded += Number(row.diagnostics?.scanner?.excluded || 0);
+      invalid += Number(row.diagnostics?.scanner?.invalid || 0);
+    }
+    const examples = filtered.flatMap(row => (row.diagnostics?.examples || []).map(example =>
+      `• ${row.query}: ${example.title} — ${REASON_LABELS[example.reason] || example.reason}`)).slice(0, 5);
+    return [`🔎 Scarti${brand ? `: ${brand}` : ''}`, `Scansione: ${romeTime(summary.completed_at)}`,
+      ...Object.entries(totals).map(([key, value]) => `${REASON_LABELS[key]}: ${value}`),
+      `Parole escluse: ${excluded}`, `Dati mancanti/non validi alla fonte: ${invalid}`, '', ...examples,
+      '', 'Solo annunci restituiti da Vinted e ricevuti dal bot; non l’intero catalogo.',
+      'Offerte idonee oltre il limite di invio: in coda, non scartate.', '/scarti Nome brand per restringere il riepilogo.'].join('\n');
+  }
+  const age = now - Date.parse(summary.completed_at);
+  const failed = Array.isArray(summary.failed_brands) ? summary.failed_brands : [];
+  let quota = 'Quota D1: verifica aggiornata non disponibile.';
+  if (usage?.day === new Date(now).toISOString().slice(0, 10)) {
+    quota = `Quota D1 verificata: ${Number(usage.rowsWritten).toLocaleString('it-IT')}/100.000 scritture (${(Number(usage.rowsWritten) / 1000).toFixed(1)}%).\nVerifica: ${romeTime(usage.checked_at)} — non è un contatore live.`;
+  }
+  return [age > 15 * 60000 ? '⚠️ Ultimo riepilogo vecchio: controllare le esecuzioni.' : failed.length ? '⚠️ Scansione parziale' : '✅ Ultima scansione completata',
+    `Ultima scansione: ${romeTime(summary.completed_at)}`,
+    `Brand ricevuti: ${results.length}/${summary.expected_brands || BRAND_NAMES.length}`,
+    `Annunci analizzati: ${results.reduce((sum, row) => sum + Number(row.items || 0), 0)}`,
+    `Notifiche confermate in questa scansione: ${results.reduce((sum, row) => sum + Number(row.published || 0), 0)}`,
+    `Offerte in coda: ${queued}`,
+    ...(failed.length ? [`Brand non completati: ${failed.slice(0, 8).join(', ')}${failed.length > 8 ? '…' : ''}`] : []),
+    ...results.filter(row => row.warnings?.length).slice(0, 3).map(row => `⚠️ ${row.query}: ${row.warnings.join('; ')}`),
+    '', quota, '', 'Controlli previsti ogni 5 minuti; possono esserci ritardi.', 'Usa /scarti per i motivi di esclusione.'].join('\n');
+}
+
+export async function sendDiagnostic(env, message, scarti) {
+  const destination = { chat_id: message.chat.id, ...(message.message_thread_id ? { message_thread_id: message.message_thread_id } : {}) };
+  const group = await env.DB.prepare('SELECT chat_id FROM telegram_groups WHERE chat_id=?').bind(String(message.chat.id)).first();
+  if (!group) {
+    await telegram(env, 'sendMessage', { ...destination, text: 'Usa /stato e /scarti nel gruppo configurato del bot.' });
+    return;
+  }
+  try {
+    const rows = await env.DB.prepare("SELECT key,value FROM state WHERE key IN ('last_scan_summary','verified_d1_usage')").all();
+    const state = Object.fromEntries(rows.results.map(row => [row.key, JSON.parse(row.value)]));
+    const queued = await env.DB.prepare('SELECT COUNT(*) AS n FROM pending_deals WHERE NOT EXISTS (SELECT 1 FROM seen_items WHERE seen_items.item_id=pending_deals.item_id)').first();
+    const brand = String(message.text || '').replace(/^\/\w+(?:@\w+)?\s*/i, '').trim().slice(0, 80);
+    await telegram(env, 'sendMessage', { ...destination, text: diagnosticText(state.last_scan_summary, queued.n, state.verified_d1_usage, scarti, brand).slice(0, 4000) });
+  } catch (_) {
+    await telegram(env, 'sendMessage', { ...destination, text: '⚠️ Non riesco a leggere lo stato dal database. Controlla i log Cloudflare: i dati non sono disponibili, non risultano zero.' });
+  }
 }
 
 async function failureResponse(env, key, error) {
@@ -775,15 +866,25 @@ export default {
           remainingPublishes -= result.published;
           results.push(result);
         }
-        const lastRun = await env.DB.prepare("SELECT value FROM state WHERE key='last_github_run'").first();
-        if (shouldRefreshHourly(lastRun?.value)) await env.DB.prepare(
-          "INSERT INTO state(key,value) VALUES('last_github_run',CURRENT_TIMESTAMP) " +
-          "ON CONFLICT(key) DO UPDATE SET value=CURRENT_TIMESTAMP"
-        ).run();
         return Response.json({ ok: true, results });
       } catch (error) {
         return failureResponse(env, 'last_error', error);
       }
+    }
+    if (url.pathname === '/scan-summary' && request.method === 'POST') {
+      if (!authorized(request, env)) return Response.json({ ok: false }, { status: 401 });
+      try {
+        const body = await request.json();
+        const summary = {
+          completed_at: new Date().toISOString(), expected_brands: BRAND_NAMES.length,
+          results: (Array.isArray(body.results) ? body.results : []).slice(0, 50),
+          failed_brands: (Array.isArray(body.failed_brands) ? body.failed_brands : []).slice(0, 50).map(name => String(name).slice(0, 80))
+        };
+        const encoded = JSON.stringify(summary);
+        if (encoded.length > 100000) return Response.json({ ok: false, error: 'Riepilogo troppo grande' }, { status: 413 });
+        await saveState(env, 'last_scan_summary', encoded);
+        return Response.json({ ok: true });
+      } catch (error) { return failureResponse(env, 'last_summary_error', error); }
     }
     if (url.pathname === "/profile-ingest" && request.method === "POST") {
       if (!authorized(request, env)) return Response.json({ ok: false }, { status: 401 });
