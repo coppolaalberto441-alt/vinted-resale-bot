@@ -9,6 +9,11 @@ from scanner import allowed, category_for, money, normalize_item, send, scan_bra
 
 
 class ScannerTests(unittest.TestCase):
+    def test_unavailable_catalog_items_are_not_normalized(self):
+        for flag in ('is_sold', 'is_reserved', 'is_closed'):
+            self.assertIsNone(normalize_item(SimpleNamespace(json_data={flag: True})))
+        self.assertIsNone(normalize_item(SimpleNamespace(is_visible=False)))
+
     def test_genuine_new_with_tags_is_not_excluded(self):
         config = json.loads(Path('brands.json').read_text(encoding='utf-8'))
         self.assertTrue(allowed({'title': 'Felpa nuovo con cartellino etichetta originale'}, config['common_exclude']))

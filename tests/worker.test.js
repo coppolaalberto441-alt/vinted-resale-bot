@@ -4,6 +4,18 @@ import { dispatchGithubWorkflow, isSetupCommand, productCategory, resaleEstimate
 import { makeCover, shouldRefreshHourly } from '../src/index.js';
 import worker from '../src/index.js';
 import { assessDeals, diagnosticText } from '../src/index.js';
+import { isFreshCatalog, scanUnhealthy } from '../src/index.js';
+
+test('catalog freshness and failure thresholds use bounded UTC timestamps', () => {
+  const now = Date.parse('2026-10-09T12:00:00Z');
+  assert.equal(isFreshCatalog('2026-10-09T11:50:00Z', now), true);
+  assert.equal(isFreshCatalog('2026-10-09T11:40:00Z', now), false);
+  assert.equal(isFreshCatalog('2026-10-09T13:00:00Z', now), false);
+  assert.equal(isFreshCatalog(null, now), false);
+  assert.equal(scanUnhealthy({ completed_at: '2026-10-09T11:55:00Z', consecutive_failures: 2 }, now), false);
+  assert.equal(scanUnhealthy({ completed_at: '2026-10-09T11:55:00Z', consecutive_failures: 3 }, now), true);
+  assert.equal(scanUnhealthy({ completed_at: '2026-10-09T11:55:00Z', last_healthy_at: '2026-10-09T11:30:00Z' }, now), true);
+});
 
 test('each rejected item has one concrete reason without changing the deal selection', () => {
   const items = [{ title: 'Felpa', price: 0 }, { title: 'Solo modello', price: 2 },
@@ -30,7 +42,7 @@ test('status distinguishes partial and stale scans and never presents old quota 
 
 test('scan summary requires authentication and adds a server-side timestamp', async () => {
   const writes = [];
-  const env = { INGEST_SECRET: 'test', DB: { prepare() { return { bind(...values) { writes.push(values); return { run: async () => ({ success: true }) }; } }; } } };
+  const env = { INGEST_SECRET: 'test', DB: { prepare() { return { first: async () => null, bind(...values) { writes.push(values); return { run: async () => ({ success: true }) }; } }; } } };
   const unauth = await worker.fetch(new Request('https://test/scan-summary', { method: 'POST' }), env, {});
   assert.equal(unauth.status, 401);
   assert.equal(writes.length, 0);

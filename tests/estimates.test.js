@@ -1,10 +1,22 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { estimateResale, conditionOf, createResaleEstimator } from '../src/estimates.js';
+import { estimateResale, conditionOf, createResaleEstimator, estimateGeneric } from '../src/estimates.js';
 import { productCategory, publish } from '../src/index.js';
 
 const target = { id: 'target', title: 'Nike Dunk Low', brand: 'Nike', condition: 'Ottime', price: 10, total: 12 };
 const peers = (prices, changes = {}) => prices.map((price, i) => ({ ...target, id: `peer${i}`, price, total: price + 50, ...changes }));
+
+test('fallback uses observed brand/category prices and explicitly warns of weak evidence', () => {
+  const sample = peers([40, 50, 60], { title: 'Nike Jordan 4', condition: 'Nuovo con cartellino' });
+  const estimate = createResaleEstimator(sample, 'Nike', productCategory)(target);
+  assert.equal(estimate.generic, true);
+  assert.equal(estimate.median, 50);
+  assert.equal(estimate.confidence, 'molto bassa');
+  assert.equal(estimate.count, 3);
+  assert.equal(estimateGeneric(target, peers([90], { brand: 'Adidas' }), 'Nike', productCategory), null);
+  assert.equal(estimateGeneric(target, [target], 'Nike', productCategory), null);
+  assert.equal(estimateGeneric(target, peers([40]), 'Nike', productCategory).count, 1);
+});
 
 test('estimates use asking prices, exclude the candidate and remove extreme outliers', () => {
   const sample = peers([40, 45, 50, 55, 60, 1000]);

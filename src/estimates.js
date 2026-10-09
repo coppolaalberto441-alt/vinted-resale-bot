@@ -46,7 +46,29 @@ function quantile(sorted, fraction) {
 export function createResaleEstimator(items, query, categoryOf) {
   const features = new Map(items.map(peer => [peer, { category: categoryOf(peer), condition: conditionOf(peer),
     type: subtype(peer, categoryOf(peer)), model: modelTokens(peer, query), title: text(peer.title), brand: text(peer.brand) }]));
-  return item => estimateResale(item, items, query, categoryOf, features);
+  return item => estimateResale(item, items, query, categoryOf, features) || estimateGeneric(item, items, query, categoryOf);
+}
+
+export function estimateGeneric(item, items, query, categoryOf) {
+  const category = categoryOf(item);
+  if (category === 'other') return null;
+  const seen = new Set();
+  const prices = items.filter(peer => {
+    if (peer === item || (item.id && String(peer.id) === String(item.id)) || (item.url && peer.url === item.url)) return false;
+    if (peer.id && seen.has(String(peer.id))) return false;
+    if (peer.id) seen.add(String(peer.id));
+    return categoryOf(peer) === category && String(peer.currency || 'EUR') === String(item.currency || 'EUR') &&
+      (!peer.brand || text(peer.brand) === text(item.brand || query)) && Number.isFinite(Number(peer.price)) && Number(peer.price) > 0;
+  }).map(peer => Number(peer.price)).sort((a, b) => a - b);
+  if (!prices.length) return null;
+  const median = quantile(prices, 0.5);
+  const low = Math.max(1, Math.floor(quantile(prices, 0.25) * 0.7));
+  const high = Math.max(low, Math.floor(median * 0.8));
+  const acquisition = Number(item.total) || Number(item.price) || 0;
+  return { low, high, suggested: Math.floor((low + high) / 2), median, count: prices.length,
+    confidence: 'molto bassa', condition: 'unknown', generic: true,
+    basis: 'stima generica marca/categoria; modello e condizione non confrontati',
+    marginLow: Math.round((low - acquisition) * 100) / 100, marginHigh: Math.round((high - acquisition) * 100) / 100 };
 }
 
 export function estimateResale(item, items, query, categoryOf, features = null) {

@@ -2,7 +2,39 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
 import { readFileSync } from 'node:fs';
-import { ingestProfile, ingestBrand, sendDiagnostic } from '../src/index.js';
+import { ingestProfile, ingestBrand, sendDiagnostic, checkScanHealth } from '../src/index.js';
+
+test('health alerts send once per persistent incident and recover after a complete scan', async () => {
+  const sqlite = new DatabaseSync(':memory:');
+  sqlite.exec(readFileSync(new URL('../schema.sql', import.meta.url), 'utf8'));
+  const env = { TELEGRAM_BOT_TOKEN: 'test', CHANNEL_ID: '1', DB: { prepare(sql) {
+    const statement = { bind(...params) { return {
+      async first() { return sqlite.prepare(sql).get(...params); },
+      async all() { return { results: sqlite.prepare(sql).all(...params) }; },
+      async run() { return sqlite.prepare(sql).run(...params); }
+    }; } };
+    return Object.assign(statement, statement.bind());
+  } } };
+  const now = Date.parse('2026-10-09T12:00:00Z');
+  const store = summary => sqlite.prepare('INSERT OR REPLACE INTO state VALUES(?,?)').run('last_scan_summary', JSON.stringify(summary));
+  const saved = globalThis.fetch, sent = [];
+  globalThis.fetch = async (_url, options) => { sent.push(JSON.parse(options.body).text); return Response.json({ ok: true, result: {} }); };
+  try {
+    store({ completed_at: '2026-10-09T11:30:00Z', failed_brands: [] });
+    await checkScanHealth(env, now);
+    await checkScanHealth(env, now);
+    assert.equal(sent.length, 1);
+    assert.match(sent[0], /difficoltà/);
+    store({ completed_at: '2026-10-09T12:00:00Z', failed_brands: [], consecutive_failures: 0 });
+    await checkScanHealth(env, now);
+    await checkScanHealth(env, now);
+    assert.equal(sent.length, 2);
+    assert.match(sent[1], /ripristinate/);
+    store({ completed_at: '2026-10-09T12:00:00Z', failed_brands: ['Nike'], consecutive_failures: 3 });
+    await checkScanHealth(env, now);
+    assert.equal(sent.length, 3);
+  } finally { globalThis.fetch = saved; sqlite.close(); }
+});
 
 test('Telegram status and brand rejection report read real storage without database writes', async () => {
   const sqlite = new DatabaseSync(':memory:');
@@ -68,8 +100,17 @@ test('excess offers survive the next empty scan, with no repeated hourly status 
     assert.equal(sqlite.prepare('SELECT COUNT(*) AS n FROM pending_deals').get().n, 5);
     assert.ok(queries < 50);
     queries = 0;
-    await ingestBrand(env, { query: 'Test', items: [] }, 1);
+    await ingestBrand(env, { query: 'Test', items: [], checked_at: new Date().toISOString() }, 1);
+    assert.equal(sent.length, 0);
+    assert.equal(sqlite.prepare('SELECT COUNT(*) AS n FROM pending_deals').get().n, 5);
+    await ingestBrand(env, { query: 'Test', items, checked_at: '2020-01-01T00:00:00Z' }, 1);
+    assert.equal(sent.length, 0);
+    queries = 0;
+    // An absent entry and an increased price must not block other current offers.
+    const refreshed = items.slice(1).map(item => item.id === '2' ? { ...item, price: 2000 } : item);
+    await ingestBrand(env, { query: 'Test', items: refreshed, checked_at: new Date().toISOString() }, 1);
     assert.equal(sent.length, 1);
+    assert.equal(sent[0].reply_markup.inline_keyboard[0][0].url, 'https://www.vinted.it/items/3');
     assert.equal(sqlite.prepare('SELECT COUNT(*) AS n FROM pending_deals').get().n, 4);
     assert.equal(sqlite.prepare('SELECT COUNT(*) AS n FROM seen_items').get().n, 1);
     assert.equal(statusWrites, 0);

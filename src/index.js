@@ -299,7 +299,7 @@ export async function publish(env, query, deal) {
     `👤 ${escapeHtml(item.seller || "Venditore non indicato")}`,
     `📊 ${discount}% sotto la mediana degli annunci attivi`, "",
     ...(resale ? [
-      `⚡ Fascia proposta: <b>${resale.low.toFixed(2)}–${resale.high.toFixed(2)} ${escapeHtml(currency)}</b>`,
+      `${resale.generic ? '⚠️ Stima generica' : '⚡ Fascia proposta'}: <b>${resale.low.toFixed(2)}–${resale.high.toFixed(2)} ${escapeHtml(currency)}</b>`,
       `🎯 Prezzo suggerito: ${resale.suggested.toFixed(2)} ${escapeHtml(currency)}`,
       `📊 ${resale.count} confronti · attendibilità ${escapeHtml(resale.confidence)}`,
       `🔎 ${escapeHtml(resale.basis)}${resale.condition === 'unknown' ? ' · condizione non verificata' : ' · stessa condizione'}`,
@@ -373,7 +373,7 @@ export async function ingestBrand(env, scan, publishLimit) {
   const seenIds = new Set((seen.results || []).map((row) => row.item_id));
   const newSeen = [];
   const queue = [];
-  const estimate = initialized && deals.length ? createResaleEstimator(items, query, productCategory) : () => null;
+  const estimate = initialized && items.length ? createResaleEstimator(items, query, productCategory) : () => null;
   let published = 0;
   for (const deal of deals) {
     const id = String(deal.item.id || "");
@@ -394,10 +394,18 @@ export async function ingestBrand(env, scan, publishLimit) {
   }
   let pending = { results: [] };
   if (initialized) {
-    pending = await env.DB.prepare('SELECT item_id,payload FROM pending_deals WHERE brand=? AND NOT EXISTS (SELECT 1 FROM seen_items WHERE seen_items.item_id=pending_deals.item_id) ORDER BY queued_at,item_id LIMIT ?')
-      .bind(query, publishLimit).all();
+    const availableIds = isFreshCatalog(scan.checked_at) ? deals.map(deal => deal.item).filter(item => !['is_sold','is_reserved','is_closed'].some(flag => item[flag] === true) && item.is_visible !== false).map(item => String(item.id)) : [];
+    pending = await env.DB.prepare('SELECT item_id,payload FROM pending_deals WHERE brand=? AND item_id IN (SELECT value FROM json_each(?)) AND NOT EXISTS (SELECT 1 FROM seen_items WHERE seen_items.item_id=pending_deals.item_id) ORDER BY queued_at,item_id LIMIT ?')
+      .bind(query, JSON.stringify(availableIds), publishLimit).all();
     for (const row of pending.results || []) {
-      await publish(env, query, JSON.parse(row.payload));
+      const current = items.find(item => String(item.id) === String(row.item_id));
+      // Absence is not proof of sale: retain the offer for a future successful scan.
+      if (!current || !isFreshCatalog(scan.checked_at) || current.is_sold === true || current.is_reserved === true || current.is_closed === true || current.is_visible === false) continue;
+      const deal = deals.find(deal => String(deal.item.id) === String(row.item_id));
+      // A price increase must not turn an old queued bargain into a bad purchase.
+      if (!deal) continue;
+      // Refresh price and estimate, including legacy queue entries.
+      await publish(env, query, { ...deal, item: current, total: amount(current.total) || amount(current.price), resale: estimate(current) });
       // Store confirmation immediately: later failures must not resend earlier successes.
       await env.DB.prepare('INSERT OR IGNORE INTO seen_items(item_id,brand) VALUES(?,?)').bind(row.item_id, query).run();
       await env.DB.prepare('DELETE FROM pending_deals WHERE item_id=?').bind(row.item_id).run();
@@ -809,6 +817,34 @@ export function shouldRefreshHourly(timestamp, now = Date.now()) {
   return !Number.isFinite(previous) || now - previous >= 3600000;
 }
 
+export function isFreshCatalog(timestamp, now = Date.now()) {
+  const checked = Date.parse(String(timestamp || ''));
+  return Number.isFinite(checked) && checked <= now + 60000 && now - checked <= 15 * 60000;
+}
+
+export function scanUnhealthy(summary, now = Date.now()) {
+  if (!summary) return false;
+  const last = Date.parse(summary.last_healthy_at || summary.completed_at || '');
+  return Number.isFinite(last) && (now - last >= 20 * 60000 || Number(summary.consecutive_failures || 0) >= 3);
+}
+
+export async function checkScanHealth(env, now = Date.now()) {
+  const rows = await env.DB.prepare("SELECT key,value FROM state WHERE key IN ('last_scan_summary','scan_incident')").all();
+  const state = Object.fromEntries((rows.results || []).map(row => [row.key, row.value]));
+  const summary = state.last_scan_summary ? JSON.parse(state.last_scan_summary) : null;
+  const unhealthy = scanUnhealthy(summary, now);
+  if (unhealthy && state.scan_incident !== 'open') {
+    // Reserve before sending: overlapping cron executions must not spam the group.
+    const reserved = await env.DB.prepare("INSERT INTO state(key,value) VALUES('scan_incident','open') ON CONFLICT(key) DO UPDATE SET value='open' WHERE value!='open' RETURNING key").first();
+    if (!reserved) return;
+    try { await telegram(env, 'sendMessage', { ...(await specialDestination(env, 'assistant')), text: '⚠️ Scansioni Vinted in difficoltà: almeno 3 cicli incompleti o nessuna scansione completa da 20 minuti. Usa /stato per i dettagli. Nessun altro avviso finché il problema persiste.' }); }
+    catch (error) { await saveState(env, 'scan_incident', 'retry'); throw error; }
+  } else if (!unhealthy && summary && !summary.failed_brands?.length && state.scan_incident === 'open') {
+    await saveState(env, 'scan_incident', 'closed');
+    await telegram(env, 'sendMessage', { ...(await specialDestination(env, 'assistant')), text: '✅ Scansioni Vinted ripristinate: ultimo ciclo completo.' });
+  }
+}
+
 async function runScheduledScan(env) {
   try {
     const previous = await env.DB.prepare(
@@ -853,6 +889,7 @@ export default {
     if (Date.now() < Date.parse(env.SCAN_RESUME_AT || '')) return;
     ctx.waitUntil(Promise.all([
       runScheduledScan(env),
+      checkScanHealth(env),
       sendOnce(env, reportKey('topic_sync'), () => syncLatestGroupTopics(env)),
       runPeriodicReports(env)
     ]));
@@ -883,11 +920,16 @@ export default {
       if (!authorized(request, env)) return Response.json({ ok: false }, { status: 401 });
       try {
         const body = await request.json();
+        const previousRow = await env.DB.prepare("SELECT value FROM state WHERE key='last_scan_summary'").first();
+        const previous = previousRow ? JSON.parse(previousRow.value) : {};
         const summary = {
           completed_at: new Date().toISOString(), expected_brands: BRAND_NAMES.length,
           results: (Array.isArray(body.results) ? body.results : []).slice(0, 50),
           failed_brands: (Array.isArray(body.failed_brands) ? body.failed_brands : []).slice(0, 50).map(name => String(name).slice(0, 80))
         };
+        const healthy = summary.failed_brands.length === 0 && summary.results.length === BRAND_NAMES.length;
+        summary.consecutive_failures = healthy ? 0 : Number(previous.consecutive_failures || 0) + 1;
+        summary.last_healthy_at = healthy ? summary.completed_at : previous.last_healthy_at || previous.completed_at || summary.completed_at;
         const encoded = JSON.stringify(summary);
         if (encoded.length > 100000) return Response.json({ ok: false, error: 'Riepilogo troppo grande' }, { status: 413 });
         await saveState(env, 'last_scan_summary', encoded);

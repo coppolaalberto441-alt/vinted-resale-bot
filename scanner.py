@@ -49,6 +49,9 @@ def money(value: Any) -> float:
 
 
 def normalize_item(item: Any) -> dict[str, Any] | None:
+    raw = getattr(item, 'json_data', None) or {}
+    if any(raw.get(flag) is True for flag in ('is_closed', 'is_sold', 'is_reserved')) or getattr(item, 'is_visible', None) is False:
+        return None
     if item.id is None or item.price is None:
         return None
     price = money(item.price)
@@ -168,7 +171,7 @@ async def scan_brand(scraper: AsyncVintedScraper, brand: dict[str, Any], exclude
             normalized[result["id"]] = result
         if len(items) < 50:
             break
-    return {"query": query, "items": list(normalized.values()), "warnings": warnings, "diagnostics": diagnostics}
+    return {"query": query, "items": list(normalized.values()), "checked_at": datetime.now(timezone.utc).isoformat(), "warnings": warnings, "diagnostics": diagnostics}
 
 
 async def collect(config: dict[str, Any]) -> list[dict[str, Any]]:
