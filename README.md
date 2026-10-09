@@ -45,3 +45,13 @@ Nel gruppo corrente, `/strumenti` mostra i nuovi comandi:
 - `/registro` elenca gli ultimi 20 acquisti; `/risultati` mostra vendite, risultato realizzato e capitale negli invenduti per brand. Ogni utente ha il proprio registro nel gruppo; le risposte sono visibili nel gruppo. Gli invenduti non contano come profitto. Costi omessi e imposte non sono inclusi. Il bot non deduce vendite automaticamente e non accede all'account Vinted.
 
 La tabella aggiuntiva si crea con `wrangler d1 execute vinted-resale-bot --remote --file migrations/0001_resale_trades.sql` prima del rilascio. Migrazione additiva e ripetibile, senza cancellazioni. Filtri e registrazioni scrivono solo su comando; ordinamento e scansioni non aggiungono chiamate AI o richieste Vinted.
+
+## Consiglio di rivendita dopo l'acquisto
+
+`/acquisto 123 | 5MC2 | 13,50` conserva il costo totale e risponde anche con un prezzo di partenza, fascia indicativa, margine e avviso di possibile perdita. Se l'ID non è presente nel campione recente, specifica il tipo: `/acquisto 123 | 5MC2 | 13,50 | felpa`. Per un acquisto già registrato: `/stima 123 | felpa`. La stima usa sempre il costo salvato, anche se un comando duplicato dichiara un importo diverso.
+
+Non viene stimato il tipo di articolo dalla sola marca. Il costo determina il pareggio e il margine, non il valore di mercato: una cattiva spesa può produrre un consiglio di vendita in perdita. Quando il tipo è fornito manualmente la condizione è sconosciuta e l'attendibilità rimane bassa. Si confrontano prezzi richiesti, non vendite concluse, senza garanzia di vendita.
+
+Per contenere il consumo, si conserva solo l'ultimo campione di massimo 100 articoli per brand **una volta all'ora**, insieme alle statistiche già esistenti: fino a 960 aggiornamenti della cache al giorno per 40 brand, non una scrittura per articolo. La cache usa lo stesso lettore, senza nuove richieste Vinted né AI. I consigli fanno poche letture solo su comando, senza nuova tabella o cron. Dati più vecchi di 24 ore non sono usati; in mancanza di confronti si può usare l'ultima mediana oraria della stessa marca/categoria, esplicitamente etichettata come dato aggregato a bassissima attendibilità. La cache comincia a popolarsi al prossimo aggiornamento orario.
+
+Nessun autobuy è implementato: manca un'integrazione autorizzata per eseguire acquisti. Nessun cookie, credenziale Vinted o dato di pagamento viene richiesto o archiviato.

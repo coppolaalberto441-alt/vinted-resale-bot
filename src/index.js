@@ -1,6 +1,7 @@
 import brandConfig from "../brands.json" with { type: "json" };
 import { createResaleEstimator } from './estimates.js';
 import { handleResaleTools, matchesFilters, rankOffers } from './resale-tools.js';
+import { catalogSnapshot } from './purchase-advice.js';
 
 const DEAL_RATIO = 0.55;
 const MAX_PUBLISHES_PER_REQUEST = 4;
@@ -247,7 +248,7 @@ async function syncLatestGroupTopics(env) {
 async function handleTelegramUpdate(env, update) {
   const message = update?.message;
   if (!message) return;
-  if (await handleResaleTools(env, message, telegram, BRAND_NAMES)) return;
+  if (await handleResaleTools(env, message, telegram, BRAND_NAMES, productCategory)) return;
   if (command(message.text, 'stato')) return sendDiagnostic(env, message, false);
   if (command(message.text, 'scarti')) return sendDiagnostic(env, message, true);
   if (isSetupCommand(message.text)) return setupTopics(env, message);
@@ -344,6 +345,7 @@ export async function ingestBrand(env, scan, publishLimit) {
     "SELECT 1 AS found FROM brand_observations WHERE bucket=? AND brand=?"
   ).bind(bucket, query).first();
   if (!observation) {
+  if (isFreshCatalog(scan.checked_at)) await saveState(env, `resale_catalog:${query}`, JSON.stringify(catalogSnapshot(items, scan.checked_at)));
   await env.DB.prepare(
     "INSERT INTO brand_observations(bucket,brand,listings,deals,favourites,median_price,observed_at) " +
     "VALUES(?,?,?,?,?,?,CURRENT_TIMESTAMP) ON CONFLICT(bucket,brand) DO UPDATE SET " +

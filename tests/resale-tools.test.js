@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
 import { readFileSync } from 'node:fs';
 import { parseFilters, matchesFilters, rankOffers, eurosToCents, handleResaleTools } from '../src/resale-tools.js';
-import { ingestBrand } from '../src/index.js';
+import { ingestBrand, productCategory } from '../src/index.js';
 
 function fixture() {
   const sqlite = new DatabaseSync(':memory:');
@@ -87,7 +87,7 @@ test('real trade storage isolates users, keeps duplicate purchases intact and ne
   const { sqlite, env } = fixture();
   const replies = [];
   const telegram = async (_env, _action, payload) => { replies.push(payload.text); return {}; };
-  const command = (text, user = 10) => handleResaleTools(env, { chat: { id: 1 }, from: { id: user }, text }, telegram, ['Nike']);
+  const command = (text, user = 10) => handleResaleTools(env, { chat: { id: 1 }, from: { id: user }, text }, telegram, ['Nike'], productCategory);
   try {
     await command('/acquisto 123 | Nike | 25,50');
     await command('/acquisto 123 | Nike | 999');
@@ -127,5 +127,8 @@ test('ingestion actually filters then prioritizes current queued deals within fr
     assert.equal(sent[0].reply_markup.inline_keyboard[0][0].url, 'https://www.vinted.it/items/best');
     assert.equal(sqlite.prepare('SELECT COUNT(*) AS n FROM pending_deals').get().n, 3);
     assert.ok(queries() < 50);
+    const cache = sqlite.prepare("SELECT value FROM state WHERE key='resale_catalog:Nike'").get().value;
+    await ingestBrand(env, { query: 'Nike', items, checked_at: new Date(Date.now() + 1000).toISOString() }, 0);
+    assert.equal(sqlite.prepare("SELECT value FROM state WHERE key='resale_catalog:Nike'").get().value, cache);
   } finally { globalThis.fetch = saved; sqlite.close(); }
 });

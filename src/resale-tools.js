@@ -1,4 +1,5 @@
 import { conditionOf } from './estimates.js';
+import { purchaseAdvice } from './purchase-advice.js';
 
 const CONDITIONS = ['new_with_tags', 'new_without_tags', 'very_good', 'good', 'satisfactory'];
 const normalized = value => String(value || '').trim().toUpperCase();
@@ -51,10 +52,10 @@ export function eurosToCents(input, allowZero = false) {
 }
 
 const money = cents => `${(Number(cents || 0) / 100).toFixed(2)} EUR`;
-const help = 'Comandi:\n/filtri — mostra i filtri\n/filtri max=80 margine=15 taglie=M,L condizioni=very_good,new_with_tags\n/filtri reset — azzera (solo amministratori)\n/acquisto ID | Marca | costo totale EUR\n/vendita ID | incasso netto EUR\n/registro — ultimi 20 acquisti\n/risultati — risultati personali per brand\nIl costo include spedizione e commissioni; l’incasso deve essere già al netto dei costi di vendita.';
+const help = 'Comandi:\n/filtri — mostra i filtri\n/filtri max=80 margine=15 taglie=M,L condizioni=very_good,new_with_tags\n/filtri reset — azzera (solo amministratori)\n/acquisto ID | Marca | costo totale EUR | tipo articolo (facoltativo)\n/stima ID | tipo articolo — consiglio di rivendita dal registro\n/vendita ID | incasso netto EUR\n/registro — ultimi 20 acquisti\n/risultati — risultati personali per brand\nIl costo include spedizione e commissioni; l’incasso deve essere già al netto dei costi di vendita.';
 
-export async function handleResaleTools(env, message, telegram, brands) {
-  const match = String(message.text || '').match(/^\/(filtri|acquisto|vendita|registro|risultati|strumenti)(?:@\w+)?(?:\s+([\s\S]*))?$/i);
+export async function handleResaleTools(env, message, telegram, brands, categoryOf) {
+  const match = String(message.text || '').match(/^\/(filtri|acquisto|stima|vendita|registro|risultati|strumenti)(?:@\w+)?(?:\s+([\s\S]*))?$/i);
   if (!match) return false;
   const chat = String(message.chat.id), user = String(message.from?.id || '');
   const reply = text => telegram(env, 'sendMessage', { chat_id: chat,
@@ -79,16 +80,27 @@ export async function handleResaleTools(env, message, telegram, brands) {
       return true;
     }
     if (!user || message.sender_chat) throw new Error('Usa il tuo account personale per registrare acquisti e vendite.');
+    if (action === 'stima') {
+      const parts = input.split('|').map(value => value.trim());
+      if (parts.length > 2 || !/^[a-zA-Z0-9_-]{1,80}$/.test(parts[0] || '') || (parts[1] !== undefined && (!parts[1] || parts[1].length > 160))) throw new Error('Formato: /stima ID | felpa (tipo facoltativo se già riconosciuto).');
+      const trade = await env.DB.prepare('SELECT item_id,brand,cost_cents FROM resale_trades WHERE chat_id=? AND user_id=? AND item_id=?').bind(chat, user, parts[0]).first();
+      await reply(trade ? await purchaseAdvice(env, trade, parts[1], categoryOf) : 'Acquisto non trovato nel tuo registro: usa prima /acquisto.');
+      return true;
+    }
     if (action === 'acquisto' || action === 'vendita') {
       const parts = input.split('|').map(value => value.trim());
       const id = parts[0];
-      if (!/^[a-zA-Z0-9_-]{1,80}$/.test(id || '') || parts.length !== (action === 'acquisto' ? 3 : 2)) throw new Error(help);
+      if (!/^[a-zA-Z0-9_-]{1,80}$/.test(id || '') || !(action === 'acquisto' ? [3,4] : [2]).includes(parts.length)) throw new Error(help);
       if (action === 'acquisto') {
         const brand = brands.find(brand => brand.toLowerCase() === parts[1].toLowerCase());
         if (!brand) throw new Error('Usa il nome esatto del brand nella sua sezione.');
         const cents = eurosToCents(parts[2]);
+        if (parts[3] !== undefined && (!parts[3] || parts[3].length > 160 || categoryOf({ title: parts[3] }) === 'other')) throw new Error('Tipo non riconosciuto: usa felpa, maglietta, scarpe, giacca, pantaloni, ecc.');
         const saved = await env.DB.prepare('INSERT OR IGNORE INTO resale_trades(chat_id,user_id,item_id,brand,cost_cents) VALUES(?,?,?,?,?) RETURNING item_id').bind(chat, user, id, brand, cents).first();
         await reply(saved ? `✅ Acquisto ${id}: ${brand}, costo ${money(cents)}. Per chiuderlo: /vendita ${id} | incasso netto` : 'Acquisto già registrato: non ho modificato il costo. Usa /registro.');
+        const trade = await env.DB.prepare('SELECT item_id,brand,cost_cents FROM resale_trades WHERE chat_id=? AND user_id=? AND item_id=?').bind(chat, user, id).first();
+        try { await reply(await purchaseAdvice(env, trade, parts[3], categoryOf)); }
+        catch (_) { await reply(`⚠️ Acquisto conservato; stima temporaneamente non disponibile. Riprova /stima ${id} | tipo articolo.`); }
       } else {
         const cents = eurosToCents(parts[1], true);
         const sold = await env.DB.prepare('UPDATE resale_trades SET proceeds_cents=?,sold_at=CURRENT_TIMESTAMP WHERE chat_id=? AND user_id=? AND item_id=? AND sold_at IS NULL RETURNING cost_cents').bind(cents, chat, user, id).first();
