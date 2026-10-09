@@ -9,6 +9,13 @@ from scanner import allowed, category_for, money, normalize_item, send, scan_bra
 
 
 class ScannerTests(unittest.TestCase):
+    def test_gap_replaces_carsicko_without_changing_brand_count(self):
+        config = json.loads(Path('brands.json').read_text(encoding='utf-8'))
+        queries = [brand['query'] for brand in config['brands']]
+        self.assertEqual(queries.count('Gap'), 1)
+        self.assertNotIn('Carsicko', queries)
+        self.assertEqual(len(queries), 40)
+
     def test_unavailable_catalog_items_are_not_normalized(self):
         for flag in ('is_sold', 'is_reserved', 'is_closed'):
             self.assertIsNone(normalize_item(SimpleNamespace(json_data={flag: True})))
