@@ -1,5 +1,6 @@
 import brandConfig from "../brands.json" with { type: "json" };
 import { createResaleEstimator } from './estimates.js';
+import { handleResaleTools, matchesFilters, rankOffers } from './resale-tools.js';
 
 const DEAL_RATIO = 0.55;
 const MAX_PUBLISHES_PER_REQUEST = 4;
@@ -246,6 +247,7 @@ async function syncLatestGroupTopics(env) {
 async function handleTelegramUpdate(env, update) {
   const message = update?.message;
   if (!message) return;
+  if (await handleResaleTools(env, message, telegram, BRAND_NAMES)) return;
   if (command(message.text, 'stato')) return sendDiagnostic(env, message, false);
   if (command(message.text, 'scarti')) return sendDiagnostic(env, message, true);
   if (isSetupCommand(message.text)) return setupTopics(env, message);
@@ -394,9 +396,13 @@ export async function ingestBrand(env, scan, publishLimit) {
   }
   let pending = { results: [] };
   if (initialized) {
+    const group = await env.DB.prepare('SELECT chat_id FROM telegram_groups ORDER BY configured_at DESC LIMIT 1').first();
+    const filterRow = group ? await env.DB.prepare('SELECT value FROM state WHERE key=?').bind(`offer_filters:${group.chat_id}`).first() : null;
+    const filters = filterRow ? JSON.parse(filterRow.value) : {};
     const availableIds = isFreshCatalog(scan.checked_at) ? deals.map(deal => deal.item).filter(item => !['is_sold','is_reserved','is_closed'].some(flag => item[flag] === true) && item.is_visible !== false).map(item => String(item.id)) : [];
     pending = await env.DB.prepare('SELECT item_id,payload FROM pending_deals WHERE brand=? AND item_id IN (SELECT value FROM json_each(?)) AND NOT EXISTS (SELECT 1 FROM seen_items WHERE seen_items.item_id=pending_deals.item_id) ORDER BY queued_at,item_id LIMIT ?')
-      .bind(query, JSON.stringify(availableIds), publishLimit).all();
+      .bind(query, JSON.stringify(availableIds), 100).all();
+    const eligible = [];
     for (const row of pending.results || []) {
       const current = items.find(item => String(item.id) === String(row.item_id));
       // Absence is not proof of sale: retain the offer for a future successful scan.
@@ -404,11 +410,16 @@ export async function ingestBrand(env, scan, publishLimit) {
       const deal = deals.find(deal => String(deal.item.id) === String(row.item_id));
       // A price increase must not turn an old queued bargain into a bad purchase.
       if (!deal) continue;
+      const resale = estimate(current);
+      if (!matchesFilters(current, resale, filters)) continue;
+      eligible.push({ ...deal, item: current, total: amount(current.total) || amount(current.price), resale });
+    }
+    for (const deal of rankOffers(eligible).slice(0, publishLimit)) {
       // Refresh price and estimate, including legacy queue entries.
-      await publish(env, query, { ...deal, item: current, total: amount(current.total) || amount(current.price), resale: estimate(current) });
+      await publish(env, query, deal);
       // Store confirmation immediately: later failures must not resend earlier successes.
-      await env.DB.prepare('INSERT OR IGNORE INTO seen_items(item_id,brand) VALUES(?,?)').bind(row.item_id, query).run();
-      await env.DB.prepare('DELETE FROM pending_deals WHERE item_id=?').bind(row.item_id).run();
+      await env.DB.prepare('INSERT OR IGNORE INTO seen_items(item_id,brand) VALUES(?,?)').bind(String(deal.item.id), query).run();
+      await env.DB.prepare('DELETE FROM pending_deals WHERE item_id=?').bind(String(deal.item.id)).run();
       published++;
       await pause(TELEGRAM_SEND_INTERVAL_MS);
     }

@@ -82,6 +82,7 @@ def normalize_item(item: Any) -> dict[str, Any] | None:
         "favourites": int(getattr(item, "favourite_count", 0) or 0),
         "brand": str(getattr(item, "brand_title", None) or getattr(getattr(item, "brand", None), "title", None) or ""),
         "condition": str(getattr(item, "status", None) or ""),
+        "size": str(getattr(item, "size_title", None) or ""),
     }
 
 
