@@ -55,3 +55,21 @@ Non viene stimato il tipo di articolo dalla sola marca. Il costo determina il pa
 Per contenere il consumo, si conserva solo l'ultimo campione di massimo 100 articoli per brand **una volta all'ora**, insieme alle statistiche già esistenti: fino a 960 aggiornamenti della cache al giorno per 40 brand, non una scrittura per articolo. La cache usa lo stesso lettore, senza nuove richieste Vinted né AI. I consigli fanno poche letture solo su comando, senza nuova tabella o cron. Dati più vecchi di 24 ore non sono usati; in mancanza di confronti si può usare l'ultima mediana oraria della stessa marca/categoria, esplicitamente etichettata come dato aggregato a bassissima attendibilità. La cache comincia a popolarsi al prossimo aggiornamento orario.
 
 Nessun autobuy è implementato: manca un'integrazione autorizzata per eseguire acquisti. Nessun cookie, credenziale Vinted o dato di pagamento viene richiesto o archiviato.
+
+## Bozze basate sulle indicazioni ufficiali Vinted
+
+Flusso: `/nuovo Gap | felpa | M | buone | 25 | colore=blu | modello=... | materiale=... | misure=... | difetti=...`. I campi extra sono facoltativi. Invia fino a 8 foto originali, una alla volta, poi `/genera`. `/dati` con lo stesso formato aggiorna i dati senza cancellare le foto.
+
+La bozza include titolo descrittivo (limite interno prudenziale 80 caratteri), descrizione da copiare con condizioni/misure/difetti confermati, prezzo dichiarato separato da stima di mercato, campi Vinted da compilare, copertina originale consigliata, ordine foto e controlli prima della pubblicazione. Le osservazioni visive restano nella sezione “da confermare”: non certificano marca, autenticità, materiale o assenza di difetti. Le vecchie analisi testuali restano compatibili, ma non vengono interpretate come misurazioni affidabili della foto.
+
+Gli hashtag proposti sono facoltativi, separati dalla descrizione, massimo tre derivati solo da marca/tipo/colore dichiarati. Non sono previsti brand estranei, liste di parole ripetute o promesse di boost. Le parentesi indicano dati che l'utente deve completare prima di copiare. Non si inventano tempi di spedizione, misure, prezzo o autenticità.
+
+`/genera` non usa più il modello di scrittura libera: prepara un testo deterministico dai dati confermati e legge la cache/statistica oraria già esistente per il prezzo. Nessuna chiamata AI, scrittura D1 o nuova richiesta Vinted per generare il testo. La valutazione visiva conserva la singola chiamata già prevista per foto e lo stesso tetto giornaliero. La copertina AI già prevista resta solo un'anteprima da confrontare con l'originale; il piano foto consiglia foto originali e non nasconde difetti.
+
+Fonti ufficiali consultate il 10 ottobre 2026:
+
+- [Contenuti raccomandati](https://www.vinted.it/help/409): filtri e dati del prodotto, prezzo, condizione, immagini, descrizione e personalizzazione sono rilevanti. Non è un algoritmo pubblico riproducibile e non garantisce viralità.
+- [Descrivere un articolo](https://www.vinted.it/help/49): dettagli pertinenti nel titolo, misure e difetti nella descrizione, nessun marchio estraneo.
+- [Foto da caricare](https://www.vinted.it/help/8/48-what-photos-you-should-upload): prima foto completa, niente collage, foto proprie, colori reali, più angoli, etichette e difetti visibili. Vinted ammette fino a 20 foto; il bot ne analizza 8 per contenere l'utilizzo.
+
+È un'ottimizzazione della pertinenza e della chiarezza basata su queste indicazioni, non una promessa di vendita o viralità. Non vengono generati like/visualizzazioni, comprati Boost o caricati annunci automaticamente.

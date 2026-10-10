@@ -2,6 +2,7 @@ import brandConfig from "../brands.json" with { type: "json" };
 import { createResaleEstimator } from './estimates.js';
 import { handleResaleTools, matchesFilters, rankOffers } from './resale-tools.js';
 import { catalogSnapshot } from './purchase-advice.js';
+import { draftFacts, draftMarket, photoReview, PHOTO_QUESTION, buildListingDraft } from './listing-draft.js';
 
 const DEAL_RATIO = 0.55;
 const MAX_PUBLISHES_PER_REQUEST = 4;
@@ -257,6 +258,7 @@ async function handleTelegramUpdate(env, update) {
   if (command(message.text, "trend30")) return sendTrendReport(env, 30, "Trend ultimi 30 giorni");
   if (command(message.text, "report")) return sendProfileReport(env, true);
   if (command(message.text, "nuovo")) return startPhotoSession(env, message);
+  if (command(message.text, "dati")) return updatePhotoData(env, message);
   if (command(message.text, "genera")) return generateDraft(env, message);
   if (Array.isArray(message.photo) && message.photo.length) return analyzePhoto(env, message);
 }
@@ -677,8 +679,16 @@ async function startPhotoSession(env, message) {
   ).bind(String(message.chat.id), String(message.from.id), metadata).run();
   await telegram(env, "sendMessage", {
     chat_id: message.chat.id, ...(message.message_thread_id ? { message_thread_id: message.message_thread_id } : {}),
-    text: "📸 Sessione pronta. Invia fino a 8 foto, una per messaggio. Poi usa /genera.\nFormato utile: /nuovo brand | tipo | taglia | condizione | prezzo"
+    text: "📸 Sessione pronta. Invia fino a 8 foto originali, una per messaggio: fronte intero, retro, etichette, dettagli, difetti. Poi usa /genera.\nFormato: /nuovo brand | tipo | taglia | condizione | prezzo\nExtra facoltativi: | colore=blu | modello=... | materiale=... | misure=... | difetti=...\nCon /dati nello stesso formato puoi correggere i dati senza perdere le foto. Nessuna viralità garantita."
   });
+}
+
+async function updatePhotoData(env, message) {
+  const metadata = String(message.text || '').replace(/^\/dati(?:@\w+)?\s*/i, '').trim().slice(0, 2500);
+  const result = metadata ? await env.DB.prepare('UPDATE photo_sessions SET metadata=?,updated_at=CURRENT_TIMESTAMP WHERE chat_id=? AND user_id=? RETURNING user_id')
+    .bind(metadata, String(message.chat.id), String(message.from.id)).first() : null;
+  await telegram(env, 'sendMessage', { chat_id: message.chat.id, ...(message.message_thread_id ? { message_thread_id: message.message_thread_id } : {}),
+    text: result ? '✅ Dati aggiornati; foto conservate. Usa /genera.' : 'Prima usa /nuovo. Formato /dati brand | tipo | taglia | condizione | prezzo | colore=... | difetti=...' });
 }
 
 function bytesToBase64(bytes) {
@@ -747,24 +757,24 @@ async function analyzePhoto(env, message) {
     const answer = await env.AI.run("@cf/moondream/moondream3.1-9B-A2B", {
       task: 'query', image: `data:image/jpeg;base64,${image}`, stream: false,
       reasoning: false, max_tokens: 450,
-      question: "Valuta questa foto per un annuncio Vinted in italiano. Dai voto 1-10 e consigli molto brevi su luce, nitidezza, inquadratura, sfondo, visibilità completa, etichette/logo/difetti e privacy. Indica se è adatta come copertina. Non inventare autenticità o marca."
+      question: PHOTO_QUESTION
     });
-    analysis = String(answer?.answer || answer?.response || answer?.description || JSON.stringify(answer)).slice(0, 1800);
+    analysis = photoReview(answer?.answer || answer?.response || answer?.description || answer, photo.file_id);
   } catch (error) {
     const megapixels = ((Number(photo.width) * Number(photo.height)) / 1_000_000).toFixed(1);
-    analysis = `Analisi tecnica: ${photo.width}×${photo.height} (${megapixels} MP). Usa luce naturale, sfondo pulito, articolo intero e foto separate di etichette e difetti. Analisi visiva AI temporaneamente non disponibile.`;
+    analysis = photoReview({ issues: [`Foto ${photo.width}×${photo.height} (${megapixels} MP). Analisi visiva non disponibile: verifica luce naturale, nitidezza, articolo intero, etichette e difetti.`] }, photo.file_id);
   }
   analyses.push(analysis);
   await env.DB.prepare("UPDATE photo_sessions SET analyses=?,updated_at=CURRENT_TIMESTAMP WHERE chat_id=? AND user_id=?")
     .bind(JSON.stringify(analyses), String(message.chat.id), String(message.from.id)).run();
   await telegram(env, "sendMessage", {
     chat_id: message.chat.id, ...(message.message_thread_id ? { message_thread_id: message.message_thread_id } : {}),
-    text: `📷 Foto ${analyses.length}/8\n${analysis}\n\nInvia un'altra foto o usa /genera.`
+    text: `📷 Foto ${analyses.length}/8 · qualità ${analysis.score === null ? 'non verificata' : analysis.score + '/10'}\n${analysis.issues.join('\n') || 'Controlla colori fedeli, dettagli e privacy.'}\n${analysis.toConfirm.length ? 'Da confermare: ' + analysis.toConfirm.join('; ') : ''}\n\nInvia un'altra foto o usa /genera. Il voto valuta la foto, non la probabilità di vendita.`
   });
   if (analyses.length === 1) await makeCover(env, bytes, photo.file_id, destination);
 }
 
-async function generateDraft(env, message) {
+export async function generateDraft(env, message) {
   const session = await env.DB.prepare("SELECT metadata,analyses FROM photo_sessions WHERE chat_id=? AND user_id=?")
     .bind(String(message.chat.id), String(message.from.id)).first();
   if (!session) {
@@ -772,18 +782,15 @@ async function generateDraft(env, message) {
     return;
   }
   const analyses = JSON.parse(session.analyses || "[]");
-  const prompt = `Prepara in italiano una bozza Vinted pronta da copiare, senza inventare dati. Metadati: ${session.metadata || "non forniti"}. Analisi foto: ${analyses.join(" | ") || "nessuna"}. Restituisci: TITOLO (max 80 caratteri), PREZZO CONSIGLIATO con breve motivazione, DESCRIZIONE chiara, FOTO DA MIGLIORARE. Ricorda che l'utente deve confermare tutto.`;
-  let draft;
+  let market = null;
   try {
-    if (!await reserveAiUse(env, 'assistant_budget', 100)) throw new Error('Limite gratuito AI');
-    const answer = await env.AI.run("@cf/meta/llama-3.1-8b-instruct", { prompt, max_tokens: 700 });
-    draft = String(answer?.response || JSON.stringify(answer));
-  } catch (_) {
-    draft = `Titolo: ${session.metadata || "Completa brand, modello, taglia e colore"}\nDescrizione: indica misure, condizioni reali, eventuali difetti e disponibilità.\nPrezzo: confronta articoli identici attivi e resta 10-20% sotto la mediana per una vendita più rapida.`;
-  }
-  await telegram(env, "sendMessage", {
+    market = await draftMarket(env, draftFacts(session.metadata), productCategory, BRAND_NAMES);
+  } catch (_) { /* A cache outage must not prevent the truthful draft. */ }
+  const draft = `📝 BOZZA DA CONFERMARE\n\n${buildListingDraft(session.metadata, Array.isArray(analyses) ? analyses : [], market)}`;
+  // Keep long photo advice without truncating the facts or disclaimer.
+  for (let index = 0; index < draft.length; index += 3900) await telegram(env, "sendMessage", {
     chat_id: message.chat.id, ...(message.message_thread_id ? { message_thread_id: message.message_thread_id } : {}),
-    text: `📝 BOZZA DA CONFERMARE\n\n${draft.slice(0, 3500)}\n\nIl bot non pubblica né modifica l'annuncio: la conferma finale resta a te.`
+    text: draft.slice(index, index + 3900)
   });
 }
 
