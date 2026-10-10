@@ -172,7 +172,7 @@ test("estimates one quick-sale price below the active median", () => {
 
 test("uses same-category listings as price comparables", () => {
   const items = [
-    ...[40, 50, 60, 70, 80].map((price) => ({ title: "Sneakers modello", price })),
+    ...[48, 50, 60, 70, 80].map((price) => ({ title: "Sneakers modello", price })),
     ...[200, 220, 240, 260, 280].map((price) => ({ title: "Giacca modello", price }))
   ];
   assert.deepEqual(selectDeals(items), []);

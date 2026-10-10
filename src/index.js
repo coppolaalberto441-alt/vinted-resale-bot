@@ -3,8 +3,9 @@ import { createResaleEstimator } from './estimates.js';
 import { handleResaleTools, matchesFilters, rankOffers } from './resale-tools.js';
 import { catalogSnapshot } from './purchase-advice.js';
 import { draftFacts, draftMarket, photoReview, PHOTO_QUESTION, buildListingDraft } from './listing-draft.js';
+import { verifiedBrandItem, brandKey } from './brand-match.js';
 
-const DEAL_RATIO = 0.55;
+const DEAL_RATIO = Number(brandConfig.deal_ratio) || 0.70;
 const MAX_PUBLISHES_PER_REQUEST = 4;
 const TELEGRAM_SEND_INTERVAL_MS = 3200;
 const MIN_DISPATCH_INTERVAL_MS = 270000;
@@ -64,7 +65,7 @@ function medianTotal(entries) {
   return totals.length % 2 ? totals[middle] : (totals[middle - 1] + totals[middle]) / 2;
 }
 
-export function assessDeals(items) {
+export function assessDeals(items, references = []) {
   const counts = { invalid_price: 0, unknown_category: 0, few_comparables: 0, above_threshold: 0 };
   const examples = [];
   const reject = (item, reason) => {
@@ -75,9 +76,12 @@ export function assessDeals(items) {
     .map((item) => ({ item, total: amount(item.total) || amount(item.price) }))
     .filter(({ item, total }) => { if (total > 0) return true; reject(item, 'invalid_price'); return false; })
     .sort((a, b) => a.total - b.total);
-  const groups = new Map();
-  for (const entry of priced) {
-    const category = productCategory(entry.item);
+  const groups = new Map(), ids = new Set();
+  const groupKey = item => `${brandKey(item.brand)}:${item.currency || 'EUR'}:${productCategory(item)}`;
+  for (const entry of [...priced, ...references.map(item => ({ item, total: amount(item.total) || amount(item.price) })).filter(entry => entry.total > 0)]) {
+    if (entry.item.id && ids.has(String(entry.item.id))) continue;
+    if (entry.item.id) ids.add(String(entry.item.id));
+    const category = groupKey(entry.item);
     const group = groups.get(category) || [];
     group.push(entry);
     groups.set(category, group);
@@ -86,9 +90,9 @@ export function assessDeals(items) {
   const deals = priced.flatMap(({ item, total }) => {
     const category = productCategory(item);
     if (category === 'other') { reject(item, 'unknown_category'); return []; }
-    const comparable = groups.get(category);
+    const comparable = groups.get(groupKey(item));
     if (comparable.length < 3) { reject(item, 'few_comparables'); return []; }
-    const median = medians.get(category);
+    const median = medians.get(groupKey(item));
     if (total <= median * DEAL_RATIO) return [{ item, total, median }];
     reject(item, 'above_threshold');
     return [];
@@ -333,11 +337,19 @@ export async function publish(env, query, deal) {
 
 export async function ingestBrand(env, scan, publishLimit) {
   const query = String(scan?.query || "").trim();
-  const items = Array.isArray(scan?.items) ? scan.items.slice(0, 100) : [];
   if (!query) throw new Error("Ricerca senza nome");
+  const rejectedBrands = { brand_mismatch: 0, brand_unknown: 0 };
+  const verify = item => {
+    const verified = verifiedBrandItem(item, query);
+    if (!verified) rejectedBrands[item?.brand || item?.details ? 'brand_mismatch' : 'brand_unknown']++;
+    return verified;
+  };
+  const items = (Array.isArray(scan?.items) ? scan.items.slice(0, 100) : []).map(verify).filter(Boolean);
+  const references = (Array.isArray(scan?.comparables) ? scan.comparables.slice(0, 50) : []).map(verify).filter(Boolean);
+  const sample = [...items, ...references];
   const state = await env.DB.prepare("SELECT initialized,last_checked_at FROM brand_state WHERE brand = ?").bind(query).first();
   const initialized = state?.initialized === 1;
-  const assessment = assessDeals(items);
+  const assessment = assessDeals(items, references);
   const deals = assessment.deals;
   const prices = items.map((item) => amount(item.price)).filter((price) => price > 0).sort((a, b) => a - b);
   const medianPrice = prices.length ? prices[Math.floor(prices.length / 2)] : 0;
@@ -347,7 +359,7 @@ export async function ingestBrand(env, scan, publishLimit) {
     "SELECT 1 AS found FROM brand_observations WHERE bucket=? AND brand=?"
   ).bind(bucket, query).first();
   if (!observation) {
-  if (isFreshCatalog(scan.checked_at)) await saveState(env, `resale_catalog:${query}`, JSON.stringify(catalogSnapshot(items, scan.checked_at)));
+  if (isFreshCatalog(scan.checked_at)) await saveState(env, `resale_catalog:${query}`, JSON.stringify(catalogSnapshot([...items.slice(0, 100 - references.length), ...references], scan.checked_at)));
   await env.DB.prepare(
     "INSERT INTO brand_observations(bucket,brand,listings,deals,favourites,median_price,observed_at) " +
     "VALUES(?,?,?,?,?,?,CURRENT_TIMESTAMP) ON CONFLICT(bucket,brand) DO UPDATE SET " +
@@ -379,7 +391,7 @@ export async function ingestBrand(env, scan, publishLimit) {
   const seenIds = new Set((seen.results || []).map((row) => row.item_id));
   const newSeen = [];
   const queue = [];
-  const estimate = initialized && items.length ? createResaleEstimator(items, query, productCategory) : () => null;
+  const estimate = initialized && items.length ? createResaleEstimator(sample, query, productCategory) : () => null;
   let published = 0;
   for (const deal of deals) {
     const id = String(deal.item.id || "");
@@ -438,13 +450,14 @@ export async function ingestBrand(env, scan, publishLimit) {
     "ON CONFLICT(brand) DO UPDATE SET initialized=1, last_checked_at=CURRENT_TIMESTAMP"
   ).bind(query).run();
   return { query, items: items.length, deals: deals.length, published, initialized,
-    diagnostics: { ...assessment.counts, already_seen: seenIds.size, baseline: initialized ? 0 : newSeen.length,
+    diagnostics: { ...assessment.counts, ...rejectedBrands, reference_items: references.length, already_seen: seenIds.size, baseline: initialized ? 0 : newSeen.length,
       examples: assessment.examples, scanner: scan.diagnostics || null }, warnings: scan.warnings || [] };
 }
 
 const REASON_LABELS = {
   invalid_price: 'Prezzo non valido', unknown_category: 'Categoria non riconosciuta',
-  few_comparables: 'Meno di 3 confronti della stessa categoria', above_threshold: 'Sconto inferiore al 45%',
+  few_comparables: 'Meno di 3 annunci stessa marca/categoria', above_threshold: 'Sconto inferiore al 30%',
+  brand_mismatch: 'Marca diversa dalla sezione', brand_unknown: 'Marca dichiarata non disponibile',
   already_seen: 'Offerta già notificata/registrata', baseline: 'Inizializzazione (nessuna notifica)'
 };
 
@@ -465,6 +478,8 @@ export function diagnosticText(summary, queued, usage, scarti = false, brand = '
     for (const row of filtered) {
       for (const key of Object.keys(totals)) totals[key] += Number(row.diagnostics?.[key] || 0);
       excluded += Number(row.diagnostics?.scanner?.excluded || 0);
+      totals.brand_mismatch += Number(row.diagnostics?.scanner?.brand_mismatch || 0);
+      totals.brand_unknown += Number(row.diagnostics?.scanner?.brand_unknown || 0);
       invalid += Number(row.diagnostics?.scanner?.invalid || 0);
     }
     const examples = filtered.flatMap(row => (row.diagnostics?.examples || []).map(example =>

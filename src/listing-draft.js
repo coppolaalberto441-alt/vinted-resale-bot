@@ -1,4 +1,5 @@
 import { createResaleEstimator } from './estimates.js';
+import { verifiedBrandItem } from './brand-match.js';
 
 const clean = (value, limit = 160) => String(value || '').replace(/[\r\n\t]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, limit);
 const aliases = { colore: 'colour', modello: 'model', materiale: 'material', misure: 'measurements', difetti: 'flaws', riparazioni: 'repairs' };
@@ -54,7 +55,8 @@ export async function draftMarket(env, facts, categoryOf, brands, now = Date.now
   const row = await env.DB.prepare('SELECT value FROM state WHERE key=?').bind(`resale_catalog:${brand}`).first();
   const snapshot = row ? JSON.parse(row.value) : null;
   const age = now - Date.parse(snapshot?.checked_at || '');
-  const items = Number.isFinite(age) && age >= -60000 && age <= 86400000 && Array.isArray(snapshot?.items) ? snapshot.items : [];
+  const items = (Number.isFinite(age) && age >= -60000 && age <= 86400000 && Array.isArray(snapshot?.items) ? snapshot.items : [])
+    .map(item => verifiedBrandItem(item, brand)).filter(Boolean);
   const item = { title: [facts.kind, facts.brand, facts.model, facts.colour].filter(Boolean).join(' '),
     brand, category, condition: facts.condition, price: 0, total: 0, currency: 'EUR' };
   const estimate = createResaleEstimator(items, brand, categoryOf)(item);

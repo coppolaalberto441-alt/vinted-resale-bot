@@ -36,7 +36,7 @@ class ScannerTests(unittest.TestCase):
 
     def test_two_pages_deduplicate_and_do_not_have_an_implicit_price_floor(self):
         scraper = SimpleNamespace(search=AsyncMock(side_effect=[list(range(50)), [49, 50]]))
-        with patch('scanner.normalize_item', side_effect=lambda n: {'id': str(n), 'title': 'Felpa', 'price': 2}):
+        with patch('scanner.normalize_item', side_effect=lambda n: {'id': str(n), 'title': 'Felpa', 'brand': 'Test', 'price': 2}):
             result = asyncio.run(scan_brand(scraper, {'query': 'Test'}, []))
         self.assertEqual(len(result['items']), 51)
         self.assertEqual(result['diagnostics']['duplicates'], 1)
@@ -66,8 +66,49 @@ class ScannerTests(unittest.TestCase):
             "details": "Stone Island · M · Ottime", "seller": "venditore",
             "image_url": "https://img.example/1.jpg",
             "favourites": 0,
-            "brand": "", "condition": "", "size": "",
+            "brand": "Stone Island", "condition": "Ottime", "size": "M",
         })
+
+    def test_exact_brand_search_rejects_foreign_and_unknown_brands(self):
+        scraper = SimpleNamespace(search=AsyncMock(return_value=[1, 2, 3, 4]))
+        rows = {1: {'id': '1', 'title': 'Felpa', 'brand': 'Jaded London'},
+                2: {'id': '2', 'title': 'Jaded London style', 'brand': 'Nike'},
+                3: {'id': '3', 'title': 'Jaded London hoodie', 'brand': ''},
+                4: {'id': '4', 'title': 'Felpa', 'brand': 'Jaded London Kids'}}
+        with patch('scanner.normalize_item', side_effect=rows.get):
+            result = asyncio.run(scan_brand(scraper, {'query': 'Jaded London', 'brand_ids': [170260]}, []))
+        self.assertEqual([row['id'] for row in result['items']], ['1'])
+        params = scraper.search.call_args_list[0].args[0]
+        self.assertEqual(params['attribute_ids[brand]'], '170260')
+        self.assertNotIn('search_text', params)
+        self.assertEqual(result['diagnostics']['brand_mismatch'], 2)
+        self.assertEqual(result['diagnostics']['brand_unknown'], 1)
+
+    def test_all_configured_brands_fail_closed_and_aliases_are_explicit(self):
+        from scanner import brand_matches
+        config = json.loads(Path('brands.json').read_text(encoding='utf-8'))
+        for brand in config['brands']:
+            self.assertTrue(brand_matches(brand['query'], brand))
+            self.assertFalse(brand_matches('Nike', brand))
+            self.assertFalse(brand_matches('', brand))
+        self.assertTrue(brand_matches('Stüssy', {'query': 'Stussy'}))
+        self.assertTrue(brand_matches('Carhartt WIP', {'query': 'Carhartt', 'aliases': ['Carhartt WIP']}))
+        self.assertFalse(brand_matches('Nike x Stüssy', {'query': 'Stussy'}))
+
+    def test_scarce_hoodies_get_one_bounded_reference_search_without_new_candidates(self):
+        current = [{'id': 'target', 'title': 'Hoodie', 'brand': 'Jaded London'},
+                   {'id': 'pants', 'title': 'Jeans', 'brand': 'Jaded London'}]
+        reference = [{'id': 'p1', 'title': 'Hoodie', 'brand': 'Jaded London'},
+                     {'id': 'p2', 'title': 'Hoodie', 'brand': 'Nike'},
+                     {'id': 'target', 'title': 'Hoodie', 'brand': 'Jaded London'},
+                     {'id': 'p3', 'title': 'Jeans', 'brand': 'Jaded London'}]
+        scraper = SimpleNamespace(search=AsyncMock(side_effect=[current, reference]))
+        with patch('scanner.normalize_item', side_effect=lambda row: row):
+            result = asyncio.run(scan_brand(scraper, {'query': 'Jaded London', 'brand_ids': [170260]}, []))
+        self.assertEqual([item['id'] for item in result['items']], ['target', 'pants'])
+        self.assertEqual([item['id'] for item in result['comparables']], ['p1'])
+        self.assertEqual(scraper.search.call_count, 2)
+        self.assertEqual(scraper.search.call_args_list[1].args[0]['search_text'], 'hoodie')
 
     def test_excluded_words_are_case_insensitive(self):
         self.assertFalse(allowed({"title": "Stone Island REPLICA", "details": "Felpa"}, ["replica"]))

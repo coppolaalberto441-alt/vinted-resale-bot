@@ -1,4 +1,5 @@
 import { createResaleEstimator } from './estimates.js';
+import { verifiedBrandItem } from './brand-match.js';
 
 const money = value => `${Number(value).toFixed(2)} EUR`;
 
@@ -29,7 +30,8 @@ export async function purchaseAdvice(env, trade, titleHint, categoryOf, now = Da
   const row = await env.DB.prepare('SELECT value FROM state WHERE key=?').bind(`resale_catalog:${trade.brand}`).first();
   const snapshot = row ? JSON.parse(row.value) : null;
   const age = now - Date.parse(snapshot?.checked_at || '');
-  const items = Number.isFinite(age) && age >= -60000 && age <= 24 * 3600000 && Array.isArray(snapshot?.items) ? snapshot.items : [];
+  const items = (Number.isFinite(age) && age >= -60000 && age <= 24 * 3600000 && Array.isArray(snapshot?.items) ? snapshot.items : [])
+    .map(item => verifiedBrandItem(item, trade.brand)).filter(Boolean);
   const observed = items.find(item => String(item.id) === trade.item_id);
   const title = titleHint || observed?.title || '';
   if (!title || categoryOf({ title, details: observed?.details || '' }) === 'other') {

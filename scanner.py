@@ -9,6 +9,7 @@ import urllib.request
 import http.cookiejar
 import re
 import time
+import unicodedata
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
@@ -69,6 +70,9 @@ def normalize_item(item: Any) -> dict[str, Any] | None:
         str(item_box.get("first_line") or "").strip(),
         str(item_box.get("second_line") or "").strip(),
     ]))
+    declared_brand = getattr(item, 'brand', None)
+    brand_title = (declared_brand.get('title') if isinstance(declared_brand, dict) else getattr(declared_brand, 'title', None))
+    second_line = str(item_box.get('second_line') or '').split(' · ')
     return {
         "id": str(item.id),
         "title": str(item.title or "Articolo Vinted"),
@@ -80,9 +84,9 @@ def normalize_item(item: Any) -> dict[str, Any] | None:
         "seller": str(seller or "Non indicato"),
         "image_url": image_url,
         "favourites": int(getattr(item, "favourite_count", 0) or 0),
-        "brand": str(getattr(item, "brand_title", None) or getattr(getattr(item, "brand", None), "title", None) or ""),
-        "condition": str(getattr(item, "status", None) or ""),
-        "size": str(getattr(item, "size_title", None) or ""),
+        "brand": str(getattr(item, "brand_title", None) or brand_title or item_box.get('first_line') or '').strip(),
+        "condition": str(getattr(item, "status", None) or (second_line[-1] if len(second_line) >= 2 else '')).strip(),
+        "size": str(getattr(item, "size_title", None) or (second_line[0] if len(second_line) >= 2 else '')).strip(),
     }
 
 
@@ -133,20 +137,32 @@ def allowed(item: dict[str, Any], excluded: list[str]) -> bool:
     return not any(re.search(r"(?<!\w)" + re.escape(word.lower()) + r"(?!\w)", text) for word in excluded)
 
 
+def brand_key(value: str) -> str:
+    return re.sub(r'[^a-z0-9]', '', unicodedata.normalize('NFKD', str(value)).encode('ascii', 'ignore').decode().lower())
+
+
+def brand_matches(declared: str, brand: dict[str, Any]) -> bool:
+    return bool(declared) and brand_key(declared) in {brand_key(name) for name in [brand['query'], *brand.get('aliases', [])]}
+
+
 async def scan_brand(scraper: AsyncVintedScraper, brand: dict[str, Any], excluded: list[str]) -> dict[str, Any]:
     query = str(brand["query"])
     params: dict[str, Any] = {
-        "search_text": query,
         "order": "newest_first",
         "currency": "EUR",
         "page": 1,
         "per_page": 50,
     }
+    brand_ids = brand.get('brand_ids') or []
+    if brand_ids:
+        params['attribute_ids[brand]'] = ','.join(str(int(value)) for value in brand_ids)
+    else:
+        params['search_text'] = query
     if brand.get("min_price") is not None:
         params["price_from"] = str(brand["min_price"])
     normalized = {}
     warnings = []
-    diagnostics = {"received": 0, "invalid": 0, "excluded": 0, "duplicates": 0}
+    diagnostics = {"received": 0, "invalid": 0, "excluded": 0, "duplicates": 0, "brand_mismatch": 0, "brand_unknown": 0}
     seen_ids = set()
     for page in range(1, 3):
         try:
@@ -166,13 +182,42 @@ async def scan_brand(scraper: AsyncVintedScraper, brand: dict[str, Any], exclude
                 diagnostics["duplicates"] += 1
                 continue
             seen_ids.add(result["id"])
+            if not brand_matches(result.get('brand', ''), brand):
+                diagnostics['brand_mismatch' if result.get('brand') else 'brand_unknown'] += 1
+                continue
+            result['brand'] = query
             if not allowed(result, excluded):
                 diagnostics["excluded"] += 1
                 continue
             normalized[result["id"]] = result
         if len(items) < 50:
             break
-    return {"query": query, "items": list(normalized.values()), "checked_at": datetime.now(timezone.utc).isoformat(), "warnings": warnings, "diagnostics": diagnostics}
+    # At most ONE additional public search, only if a current category has too few peers.
+    # References are separate: old cheap items must never become new alert candidates.
+    groups = {}
+    for item in normalized.values():
+        category = category_for(item.get('title', ''))
+        if category != 'other':
+            groups.setdefault(category, []).append(item)
+    scarce = sorted(category for category, items in groups.items() if len(items) < 3)
+    comparables = []
+    if scarce and brand_ids:
+        # Hoodies are a frequent resale target; give their missing evidence priority.
+        category = 'hoodie' if 'hoodie' in scarce else scarce[int(time.time() // 300) % len(scarce)]
+        terms = {'shoes': 'sneakers boots', 'hoodie': 'hoodie', 'jacket': 'jacket', 'trousers': 'trousers',
+                 'tshirt': 't-shirt', 'shirt': 'shirt', 'knitwear': 'sweater', 'dress': 'dress',
+                 'skirt': 'skirt', 'tracksuit': 'tracksuit', 'hat': 'cap', 'bag': 'bag', 'accessory': 'belt'}
+        try:
+            references = await scraper.search({**params, 'search_text': terms[category], 'page': 1})
+            for source in references[:50]:
+                item = normalize_item(source)
+                if item and item['id'] not in seen_ids and brand_matches(item.get('brand', ''), brand) and allowed(item, excluded) and category_for(item.get('title', '')) == category:
+                    item['brand'] = query
+                    comparables.append(item)
+                    seen_ids.add(item['id'])
+        except Exception as error:
+            warnings.append(f'Confronti aggiuntivi non disponibili: {type(error).__name__}')
+    return {"query": query, "items": list(normalized.values()), 'comparables': comparables, "checked_at": datetime.now(timezone.utc).isoformat(), "warnings": warnings, "diagnostics": diagnostics}
 
 
 async def collect(config: dict[str, Any]) -> list[dict[str, Any]]:

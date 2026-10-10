@@ -14,7 +14,7 @@ Dopo `/nuovo`, la prima foto riceve automaticamente una proposta di copertina AI
 
 - Il cron Cloudflare avvia ogni 5 minuti GitHub Actions, che interroga Vinted.
 - Cloudflare Worker e D1 filtrano i prezzi, evitano duplicati e conservano lo stato.
-- Telegram riceve soltanto i nuovi annunci con prezzo almeno il 45% sotto la mediana attiva.
+- Telegram riceve soltanto i nuovi annunci con totale noto almeno il 30% sotto la mediana attiva della stessa marca/categoria/valuta (`deal_ratio: 0.70` in `brands.json`). Non significa profitto garantito.
 - Il profilo Vinted `155300457` viene letto senza password: il bot registra annunci attivi, prezzi e preferiti e invia un report giornaliero.
 - `/report` genera il report subito; `/trend`, `/trend7` e `/trend30` mostrano gli indici di tendenza stimati.
 - Nel gruppo configurato, `/stato` mostra il riepilogo effettivo dell'ultima scansione, brand mancanti, notifiche confermate e coda. `/scarti` mostra i motivi di esclusione; `/scarti Stone Island` restringe il riepilogo a un brand.
@@ -73,3 +73,15 @@ Fonti ufficiali consultate il 10 ottobre 2026:
 - [Foto da caricare](https://www.vinted.it/help/8/48-what-photos-you-should-upload): prima foto completa, niente collage, foto proprie, colori reali, più angoli, etichette e difetti visibili. Vinted ammette fino a 20 foto; il bot ne analizza 8 per contenere l'utilizzo.
 
 È un'ottimizzazione della pertinenza e della chiarezza basata su queste indicazioni, non una promessa di vendita o viralità. Non vengono generati like/visualizzazioni, comprati Boost o caricati annunci automaticamente.
+
+## Verifica marca e copertura delle occasioni (10 ottobre 2026)
+
+Tutte le 40 ricerche verificano la marca **dichiarata**: campo marca o prima riga del riquadro Vinted. Titolo e descrizione non possono sovrascrivere una marca diversa. Mai accettare Nike nella sezione Jaded London solo per parole chiave. Mai certificare autenticità: il campo è dichiarato dal venditore. Mai sostituire una marca mancante con quella cercata.
+
+Gli identificativi esatti pubblici verificati sono in `brand_ids`: la ricerca viene filtrata sul server Vinted senza testo generico. Dove non è stato verificato un identificativo, si mantiene la ricerca testuale con controllo locale rigoroso: possono restare meno risultati. Non associare automaticamente il primo suggerimento fuzzy (es. EXP5 → SUD Express). Alias espliciti per Carhartt WIP, Palace Skateboards, Arte ([sito ufficiale](https://arte-antwerp.com/pages/about)) e PESO ([sito ufficiale](https://pesoclo.com/)); mai tutte le collaborazioni automaticamente. EXP5, 545 streetwear, NWHR, RRR123 e PDF Channel restano senza ID verificato: le ultime tre ricerche hanno restituito anche articoli con marca dichiarata esatta nel controllo reale, le prime due richiedono esempi per verificare denominazioni diverse. FiveFourFive è già una ricerca esatta distinta; non cambiare automaticamente la sezione 545.
+
+Il Worker ripete il controllo prima di statistiche, stime e notifiche, anche con lettori vecchi o annunci già in coda. Non cancella lo storico: le notifiche precedenti possono contenere marchi errati; le nuove statistiche orarie usano i dati filtrati. Le cache di prezzi lette su comando vengono filtrate nuovamente; i vecchi aggregati storici non possono essere corretti retroattivamente senza un nuovo campione.
+
+Se una categoria corrente ha meno di tre annunci, il lettore effettua **al massimo una** ricerca supplementare marca/categoria per ciclo, con massimo 50 confronti. Le felpe carenti hanno priorità; altrimenti le categorie carenti ruotano ogni cinque minuti. Questo non garantisce confronti per ogni categoria in ogni ciclo. I confronti sono restituiti separatamente e non diventano candidati né nuovi annunci: restano candidati solo i risultati delle prime due pagine recenti. Errori di confronto non interrompono la scansione principale. Cache sempre limitata a 100 elementi, aggiornamento orario, nessuna chiamata AI o nuova tabella/query/scrittura per conservare i confronti; l'ampliamento delle offerte può comunque aumentare notifiche e scritture della coda.
+
+Tre annunci della stessa marca/categoria/valuta sono il minimo della selezione; modello e condizione della selezione non sono necessariamente identici. La stima di rivendita separata dichiara campione e attendibilità. Non sono vendite concluse. `/scarti Jaded London` mostra anche le marche diverse e quelle non disponibili. Scanner sempre con concorrenza massima quattro: ricerche distribuite nello stesso ciclo, non tutte nello stesso millisecondo; frequenza e copertura non garantiscono ogni annuncio del catalogo.

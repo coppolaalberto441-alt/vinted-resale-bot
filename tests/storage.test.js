@@ -94,7 +94,7 @@ test('excess offers survive the next empty scan, with no repeated hourly status 
   };
   try {
     const items = [...Array(5).fill(5), ...Array(8).fill(100)].map((price, i) => ({
-      id: String(i + 1), title: 'Felpa', price, url: `https://www.vinted.it/items/${i + 1}`
+      id: String(i + 1), title: 'Felpa', brand: 'Test', price, url: `https://www.vinted.it/items/${i + 1}`
     }));
     await ingestBrand(env, { query: 'Test', items }, 0);
     assert.equal(sqlite.prepare('SELECT COUNT(*) AS n FROM pending_deals').get().n, 5);
