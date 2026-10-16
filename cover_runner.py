@@ -6,10 +6,10 @@ import urllib.request
 
 
 def api(path, *, job=None, data=None, content_type='application/json'):
-    base = os.environ['WORKER_URL'].rstrip('/')
+    base = os.environ['WORKER_URL'].strip().rstrip('/')
     if not base.startswith('https://'):
         raise ValueError('HTTPS required')
-    headers = {'Authorization': 'Bearer ' + os.environ['INGEST_SECRET'], 'Content-Type': content_type}
+    headers = {'Authorization': 'Bearer ' + os.environ['INGEST_SECRET'].strip(), 'Content-Type': content_type}
     if job:
         path += '?id=' + job['id']
         headers['x-cover-lease'] = job['lease']
@@ -48,5 +48,9 @@ def main():
 if __name__ == '__main__':
     try:
         main()
-    except Exception:
-        raise SystemExit('Cover workflow failed; original retained. No paid fallback enabled.') from None
+    except urllib.error.HTTPError as error:
+        raise SystemExit(f'Cover connection HTTP {error.code}; original retained. No paid fallback enabled.') from None
+    except urllib.error.URLError:
+        raise SystemExit('Cover network connection failed; original retained. No paid fallback enabled.') from None
+    except Exception as error:
+        raise SystemExit(f'Cover workflow failed ({type(error).__name__}); original retained. No paid fallback enabled.') from None
