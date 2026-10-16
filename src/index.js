@@ -4,6 +4,7 @@ import { handleResaleTools, matchesFilters, rankOffers } from './resale-tools.js
 import { catalogSnapshot } from './purchase-advice.js';
 import { draftFacts, draftMarket, photoReview, PHOTO_QUESTION, buildListingDraft } from './listing-draft.js';
 import { verifiedBrandItem, brandKey } from './brand-match.js';
+import { queueCover, maintainCoverJobs, coverRoute } from './cover-jobs.js';
 
 const DEAL_RATIO = Number(brandConfig.deal_ratio) || 0.70;
 const MAX_PUBLISHES_PER_REQUEST = 4;
@@ -264,6 +265,7 @@ async function handleTelegramUpdate(env, update) {
   if (command(message.text, "nuovo")) return startPhotoSession(env, message);
   if (command(message.text, "dati")) return updatePhotoData(env, message);
   if (command(message.text, "genera")) return generateDraft(env, message);
+  if (command(message.text, "copertina")) return requestPhotoCover(env, message);
   if (Array.isArray(message.photo) && message.photo.length) return analyzePhoto(env, message);
 }
 
@@ -694,7 +696,7 @@ async function startPhotoSession(env, message) {
   ).bind(String(message.chat.id), String(message.from.id), metadata).run();
   await telegram(env, "sendMessage", {
     chat_id: message.chat.id, ...(message.message_thread_id ? { message_thread_id: message.message_thread_id } : {}),
-    text: "📸 Sessione pronta. Invia fino a 8 foto originali, una per messaggio: fronte intero, retro, etichette, dettagli, difetti. Poi usa /genera.\nFormato: /nuovo brand | tipo | taglia | condizione | prezzo\nExtra facoltativi: | colore=blu | modello=... | materiale=... | misure=... | difetti=...\nCon /dati nello stesso formato puoi correggere i dati senza perdere le foto. Nessuna viralità garantita."
+    text: "📸 Sessione pronta. Invia fino a 8 foto originali, una per messaggio: fronte intero, retro, etichette, dettagli, difetti. Poi usa /genera. La prima foto avvia lo scontorno gratuito su GitHub; con /copertina 2 scegli un'altra foto. Niente ricostruzioni del capo.\nFormato: /nuovo brand | tipo | taglia | condizione | prezzo\nExtra facoltativi: | colore=blu | modello=... | materiale=... | misure=... | difetti=...\nCon /dati nello stesso formato puoi correggere i dati senza perdere le foto. Nessuna viralità garantita."
   });
 }
 
@@ -723,34 +725,28 @@ async function reserveAiUse(env, kind, limit) {
   return Boolean(result);
 }
 
-export async function makeCover(env, bytes, fileId, destination) {
+export async function makeCover(env, _bytes, fileId, destination) {
   if (!await reserveAiUse(env, 'cover_budget', 10)) {
     await telegram(env, 'sendMessage', { ...destination, text: '📸 Limite gratuito delle copertine raggiunto per oggi (10). Riprova domani; originale e bozza restano disponibili.' });
     return;
   }
-  const form = new FormData();
-  form.append('input_image_0', new Blob([bytes], { type: 'image/jpeg' }), 'original.jpg');
-  form.append('width', '768');
-  form.append('height', '1024');
-  form.append('prompt', 'Edit this real secondhand product photograph into a clean resale listing cover. Preserve the exact item, true colours, logos, text, proportions, texture, visible wear and every defect. Only replace the background with a plain warm off-white surface, center the full item and improve neutral lighting gently. No model, no mannequin, no added accessories, no invented hidden parts, no wrinkle or damage removal.');
-  const multipart = new Response(form);
   try {
-    const result = await env.AI.run('@cf/black-forest-labs/flux-2-klein-4b', {
-      multipart: { body: multipart.body, contentType: multipart.headers.get('content-type') }
-    });
-    if (typeof result?.image !== 'string' || !result.image) throw new Error('Copertina non ricevuta');
-    const encoded = result.image.replace(/^data:image\/\w+;base64,/, '');
-    const binary = atob(encoded);
-    const imageBytes = Uint8Array.from(binary, (character) => character.charCodeAt(0));
-    const upload = new FormData();
-    for (const [key, value] of Object.entries(destination)) upload.append(key, String(value));
-    upload.append('photo', new Blob([imageBytes], { type: 'image/png' }), 'copertina.png');
-    upload.append('caption', '📸 Copertina proposta con AI. Confrontala con la tua foto: colore, logo, forma e difetti devono coincidere. Conserva anche le foto originali nell’annuncio.');
-    const sent = await fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/sendPhoto`, { method: 'POST', body: upload });
-    if (!sent.ok) throw new Error(`Invio copertina HTTP ${sent.status}`);
+    await queueCover(env, fileId, destination);
   } catch (_) {
-    await telegram(env, 'sendPhoto', { ...destination, photo: fileId, caption: 'La copertina AI non è disponibile ora. Ho mantenuto la tua foto originale: nessun servizio a pagamento viene attivato.' });
+    await telegram(env, 'sendPhoto', { ...destination, photo: fileId, caption: 'Scontorno gratuito non disponibile ora: mantengo la foto originale, senza ridisegnare il capo né attivare servizi a pagamento.' });
   }
+}
+
+export async function requestPhotoCover(env, message) {
+  const indexText = String(message.text || '').replace(/^\/copertina(?:@\w+)?\s*/i,'').trim() || '1';
+  const index = /^\d$/.test(indexText) ? Number(indexText) : 0;
+  const row = await env.DB.prepare('SELECT analyses FROM photo_sessions WHERE chat_id=? AND user_id=?')
+    .bind(String(message.chat.id),String(message.from.id)).first();
+  const analyses = row ? JSON.parse(row.analyses || '[]') : [];
+  const fileId = index >= 1 && index <= 8 ? analyses[index-1]?.fileId : null;
+  const destination = {chat_id:message.chat.id,...(message.message_thread_id ? {message_thread_id:message.message_thread_id} : {})};
+  if (!fileId) return telegram(env,'sendMessage',{...destination,text:'Usa /copertina N con il numero di una tua foto della sessione (1–8). Per vecchie sessioni senza riferimento foto, reinvia l’originale dopo /nuovo.'});
+  return makeCover(env,null,fileId,destination);
 }
 
 async function analyzePhoto(env, message) {
@@ -924,6 +920,7 @@ export default {
     if (Date.now() < Date.parse(env.SCAN_RESUME_AT || '')) return;
     ctx.waitUntil(Promise.all([
       runScheduledScan(env),
+      maintainCoverJobs(env).catch(() => {}),
       checkScanHealth(env),
       sendOnce(env, reportKey('topic_sync'), () => syncLatestGroupTopics(env)),
       runPeriodicReports(env)
@@ -933,6 +930,10 @@ export default {
     const url = new URL(request.url);
     if (url.pathname === "/health") {
       return Response.json({ ok: true, service: "vinted-resale-bot", scanner: "github-actions", resume_at: env.SCAN_RESUME_AT || null });
+    }
+    if (url.pathname.startsWith('/cover-jobs/')) {
+      try { return await coverRoute(request, env); }
+      catch (_) { return Response.json({ok:false,error:'Cover processing unavailable'},{status:503}); }
     }
     if (url.pathname === "/ingest" && request.method === "POST") {
       if (!authorized(request, env)) return Response.json({ ok: false }, { status: 401 });

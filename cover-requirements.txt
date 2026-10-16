@@ -1,0 +1,4 @@
+rembg[cpu]==2.0.67
+Pillow==11.3.0
+numpy==2.2.6
+onnxruntime==1.23.2
