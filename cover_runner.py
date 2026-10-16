@@ -9,7 +9,9 @@ def api(path, *, job=None, data=None, content_type='application/json'):
     base = os.environ['WORKER_URL'].strip().rstrip('/')
     if not base.startswith('https://'):
         raise ValueError('HTTPS required')
-    headers = {'Authorization': 'Bearer ' + os.environ['INGEST_SECRET'].strip(), 'Content-Type': content_type}
+    # Match the existing authenticated scanner's HTTP compatibility headers.
+    headers = {'Authorization': 'Bearer ' + os.environ['INGEST_SECRET'].strip(),
+               'Content-Type': content_type, 'Accept': '*/*', 'User-Agent': 'Mozilla/5.0'}
     if job:
         path += '?id=' + job['id']
         headers['x-cover-lease'] = job['lease']

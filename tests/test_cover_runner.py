@@ -15,6 +15,7 @@ class RunnerTests(unittest.TestCase):
                 request=opened.call_args.args[0]
                 self.assertEqual(request.full_url,'https://worker.test/cover-jobs/claim')
                 self.assertEqual(request.get_header('Authorization'),'Bearer secret')
+                self.assertEqual(request.get_header('User-agent'),'Mozilla/5.0')
 
     def test_api_refuses_plain_http(self):
         with patch.dict(os.environ,{'WORKER_URL':'http://worker.test','INGEST_SECRET':'secret'}):
