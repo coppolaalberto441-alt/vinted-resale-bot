@@ -88,6 +88,8 @@ Tre annunci della stessa marca/categoria/valuta sono il minimo della selezione; 
 
 ## Copertina gratuita senza ricostruire il capo (16 ottobre 2026)
 
+Aggiornamento brand del 18 ottobre: `EXP5` sostituito da `Experiment Five`, ID Vinted esatto verificato `15406939`. Nome corretto confermato dal [sito del marchio](https://experiment-five.com/). Restano 40 ricerche. Lo storico EXP5 non viene cancellato; i nuovi dati appartengono a Experiment Five.
+
 La prima foto dopo `/nuovo` mette in coda una copertina. `/copertina 2` usa la seconda foto della stessa sessione e dello stesso utente; massimo 10 richieste complessive al giorno UTC, anche fallite. Il flusso degli annunci/offerte rimane separato.
 
 Workflow `vinted-cover.yml`, solo runner standard `ubuntu-latest` e repository pubblico, 12 minuti massimi per esecuzione, concorrenza uno. Gli stessi secret già presenti `WORKER_URL` e `INGEST_SECRET` bastano: nessun token Telegram nei secret GitHub, nessuna API OpenAI/Gemini o API immagine a pagamento. Il token GitHub già presente sul Worker deve poter avviare anche il nuovo workflow. Nessun acquisto o nuova fatturazione attivata. GitHub può accodare/interrompere esecuzioni e cambiare i limiti gratuiti: non è elaborazione illimitata né immediata. Il workflow non gira su repository privati e non usa runner GPU/larger a pagamento.

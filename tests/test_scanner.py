@@ -9,6 +9,14 @@ from scanner import allowed, category_for, money, normalize_item, send, scan_bra
 
 
 class ScannerTests(unittest.TestCase):
+    def test_experiment_five_replaces_exp5_with_verified_exact_brand_filter(self):
+        config = json.loads(Path('brands.json').read_text(encoding='utf-8'))
+        queries = [brand['query'] for brand in config['brands']]
+        self.assertNotIn('EXP5', queries)
+        self.assertEqual(queries.count('Experiment Five'), 1)
+        self.assertEqual(next(b for b in config['brands'] if b['query'] == 'Experiment Five')['brand_ids'], [15406939])
+        self.assertEqual(len(queries), 40)
+
     def test_gap_replaces_carsicko_without_changing_brand_count(self):
         config = json.loads(Path('brands.json').read_text(encoding='utf-8'))
         queries = [brand['query'] for brand in config['brands']]
